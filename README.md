@@ -58,8 +58,8 @@ hay, aparece abajo el botón "Actualizar a la versión...": baja el instalador, 
 programa y lo abre. También se puede buscar a mano en *Archivo > Buscar actualizaciones*.
 
 Para publicar una versión nueva: subir el número en `CMakeLists.txt` (y en `assets/lienzo.rc`
-e `installer/lienzo-casero.nsi`), y crear una etiqueta `vX.Y.Z` en `main`. GitHub Actions
-compila el instalador y lo publica en Releases.
+e `installer/lienzo-casero.nsi`) y unir los cambios a `main`. GitHub Actions compila el
+instalador y, si esa versión aún no está en Releases, la publica sola.
 
 ## Atajos de teclado
 
