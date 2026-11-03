@@ -17,6 +17,10 @@ int magic_extract(Image src, int px, int py, float tolerance, Image *part, int *
 int magic_extract_box(Image src, int x0, int y0, int x1, int y1, float tolerance,
                       Image *part, int *bx, int *by, Image *rest, Color *mainColor);
 
+// Para letras: solo separa lo que es del color de las letras (no los dibujos de alrededor)
+int magic_extract_text(Image src, int x0, int y0, int x1, int y1, float tolerance,
+                       Image *part, int *bx, int *by, Image *rest, Color *textColor);
+
 // Da a los píxeles transparentes del borde el color de sus vecinos (evita bordes oscuros al escalar)
 void image_bleed_edges(Image *img);
 

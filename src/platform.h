@@ -31,6 +31,11 @@ bool plat_make_dir(const char *path);
 // Lista los archivos de una carpeta que terminan en "ext". Devuelve cuántos.
 int plat_list_dir(const char *dir, const char *ext, char (*names)[260], int max);
 
+// Leer el texto de una imagen PNG (OCR). En Windows usa el lector de texto que trae el sistema.
+// Escribe una línea por cada renglón: "x y ancho alto<TAB>texto" (en píxeles de la imagen).
+// Devuelve false si no se ha podido (por ejemplo, Windows sin el idioma instalado).
+bool plat_ocr(const char *pngPath, char *out, int max);
+
 void plat_message(const char *title, const char *msg);
 // 1 = sí, 0 = no, -1 = cancelar
 int plat_ask_yes_no_cancel(const char *title, const char *msg);

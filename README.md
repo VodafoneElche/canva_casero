@@ -28,8 +28,10 @@ sin internet en **Windows 10 y 11 (64 bits)**.
   o arrastrando el PDF a la ventana.
 - **Lápiz mágico** (para fotos y JPEG): toca o rodea un dibujo o un texto de la imagen y se
   separa del fondo como una capa nueva. Funciona también con fondos de degradado.
-- **Corregir texto** (para JPEG): rodea un texto de la imagen; se borra rellenando el hueco con
-  el fondo y aparece un texto nuevo del mismo color para escribirlo bien.
+- **Editar texto de la imagen** (para JPEG): rodea un texto de la imagen; el programa lee las
+  letras con el lector de texto de Windows 10/11, las borra rellenando el hueco con el fondo y
+  pone en su sitio un texto editable con la letra más parecida, el mismo tamaño, color,
+  alineación e interlineado.
 - **Imágenes**: desde el ordenador, arrastrándolas a la ventana o pegándolas con Ctrl+V.
   Se guardan dentro del diseño, así que un `.lienzo` se puede pasar a otro ordenador.
 - **Mover, cambiar de tamaño y girar** con el ratón. Imán para centrar en el lienzo.
@@ -43,7 +45,7 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 1. Entra en la pestaña **Actions** del repositorio, abre la última ejecución correcta de
    "Compilar" y descarga `LienzoCasero-instalador-windows`.
    (Cuando se publique una versión, también estará en **Releases**.)
-2. Descomprime el zip y ejecuta `LienzoCasero-0.5.0-instalador.exe`.
+2. Descomprime el zip y ejecuta `LienzoCasero-0.6.0-instalador.exe`.
 3. Windows puede avisar con "Windows protegió su PC" porque el programa no está firmado:
    pulsa **Más información** y luego **Ejecutar de todas formas**.
 

@@ -183,6 +183,68 @@ int plat_list_dir(const char *dir, const char *ext, char (*names)[260], int max)
     return n;
 }
 
+
+// ---- Leer texto de imágenes con el OCR de Windows 10/11 (Windows.Media.Ocr) ----
+static const char OCR_PS1[] =
+"param([string]$img, [string]$out)\r\n"
+"$ErrorActionPreference = 'Stop'\r\n"
+"try {\r\n"
+"Add-Type -AssemblyName System.Runtime.WindowsRuntime\r\n"
+"$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]\r\n"
+"$null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]\r\n"
+"$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType = WindowsRuntime]\r\n"
+"$null = [Windows.Globalization.Language, Windows.Foundation, ContentType = WindowsRuntime]\r\n"
+"$asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]\r\n"
+"function Await($op, [Type]$t) { $task = $asTask.MakeGenericMethod($t).Invoke($null, @($op)); $null = $task.Wait(-1); $task.Result }\r\n"
+"$file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($img)) ([Windows.Storage.StorageFile])\r\n"
+"$stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])\r\n"
+"$dec = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])\r\n"
+"$bmp = Await ($dec.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])\r\n"
+"$engine = $null\r\n"
+"foreach ($code in @('es-ES', 'es')) { if ($engine -eq $null) { $lang = New-Object Windows.Globalization.Language $code; if ([Windows.Media.Ocr.OcrEngine]::IsLanguageSupported($lang)) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($lang) } } }\r\n"
+"if ($engine -eq $null) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }\r\n"
+"$res = Await ($engine.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])\r\n"
+"$sb = New-Object System.Text.StringBuilder\r\n"
+"foreach ($line in $res.Lines) {\r\n"
+"  $x0 = 1e9; $y0 = 1e9; $x1 = -1e9; $y1 = -1e9\r\n"
+"  foreach ($w in $line.Words) { $r = $w.BoundingRect; if ($r.X -lt $x0) { $x0 = $r.X }; if ($r.Y -lt $y0) { $y0 = $r.Y }; if ($r.X + $r.Width -gt $x1) { $x1 = $r.X + $r.Width }; if ($r.Y + $r.Height -gt $y1) { $y1 = $r.Y + $r.Height } }\r\n"
+"  $null = $sb.Append(('{0} {1} {2} {3}' -f [int]$x0, [int]$y0, [int]($x1 - $x0), [int]($y1 - $y0)) + \"`t\" + $line.Text + \"`n\")\r\n"
+"}\r\n"
+"[System.IO.File]::WriteAllText($out, $sb.ToString(), (New-Object System.Text.UTF8Encoding $false))\r\n"
+"} catch { [System.IO.File]::WriteAllText($out, 'ERROR ' + $_.Exception.Message) }\r\n";
+
+bool plat_ocr(const char *pngPath, char *out, int max)
+{
+    out[0] = 0;
+    wchar_t tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    wchar_t ps1[MAX_PATH + 40], res[MAX_PATH + 40];
+    swprintf(ps1, MAX_PATH + 40, L"%lslienzo_ocr.ps1", tmp);
+    swprintf(res, MAX_PATH + 40, L"%lslienzo_ocr.txt", tmp);
+    FILE *f = _wfopen(ps1, L"wb");
+    if (!f) return false;
+    fwrite(OCR_PS1, 1, sizeof(OCR_PS1) - 1, f);
+    fclose(f);
+    DeleteFileW(res);
+    wchar_t *img = to_wide(pngPath);
+    wchar_t cmd[4096];
+    swprintf(cmd, 4096, L"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%ls\" \"%ls\" \"%ls\"", ps1, img, res);
+    free(img);
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = { 0 };
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) return false;
+    WaitForSingleObject(pi.hProcess, 30000);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    FILE *r = _wfopen(res, L"rb");
+    if (!r) return false;
+    int n = (int)fread(out, 1, max - 1, r);
+    fclose(r);
+    out[n < 0 ? 0 : n] = 0;
+    if (strncmp(out, "ERROR", 5) == 0) return false;
+    return true;
+}
+
 void plat_message(const char *title, const char *msg)
 {
     wchar_t *t = to_wide(title), *m = to_wide(msg);
@@ -309,6 +371,44 @@ int plat_list_dir(const char *dir, const char *ext, char (*names)[260], int max)
     }
     closedir(d);
     return n;
+}
+
+
+// En Linux (para pruebas) usamos tesseract si está instalado
+bool plat_ocr(const char *pngPath, char *out, int max)
+{
+    out[0] = 0;
+    char cmd[2400];
+    snprintf(cmd, sizeof(cmd), "tesseract '%s' stdout -l spa --psm 6 tsv 2>/dev/null", pngPath);
+    FILE *p = popen(cmd, "r");
+    if (!p) return false;
+    char line[2048];
+    int curKey = -1, x0 = 0, y0 = 0, x1 = 0, y1 = 0, len = 0;
+    char text[1024] = { 0 };
+    bool any = false;
+    while (fgets(line, sizeof(line), p)) {
+        int level, page, block, par, ln, word, l, t, w, h;
+        float conf;
+        char wtext[512] = { 0 };
+        if (sscanf(line, "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%f\t%511[^\n]", &level, &page, &block, &par, &ln, &word, &l, &t, &w, &h, &conf, wtext) < 11) continue;
+        if (level != 5 || !wtext[0]) continue;
+        int key = block * 10000 + par * 100 + ln;
+        if (key != curKey) {
+            if (any) len += snprintf(out + len, max - len, "%d %d %d %d\t%s\n", x0, y0, x1 - x0, y1 - y0, text);
+            curKey = key; x0 = l; y0 = t; x1 = l + w; y1 = t + h; text[0] = 0; any = true;
+        } else {
+            if (l < x0) x0 = l;
+            if (t < y0) y0 = t;
+            if (l + w > x1) x1 = l + w;
+            if (t + h > y1) y1 = t + h;
+            strncat(text, " ", sizeof(text) - strlen(text) - 1);
+        }
+        strncat(text, wtext, sizeof(text) - strlen(text) - 1);
+        if (len >= max - 1) break;
+    }
+    if (any && len < max - 1) len += snprintf(out + len, max - len, "%d %d %d %d\t%s\n", x0, y0, x1 - x0, y1 - y0, text);
+    pclose(p);
+    return any;
 }
 
 void plat_message(const char *title, const char *msg)

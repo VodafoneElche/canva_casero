@@ -279,8 +279,8 @@ static void median_line(Px *line, int n)
     free(tmp);
 }
 
-int magic_extract_box(Image src, int x0, int y0, int x1, int y1, float tolerance,
-                      Image *part, int *bx, int *by, Image *rest, Color *mainColor)
+static int extract_box(Image src, int x0, int y0, int x1, int y1, float tolerance,
+                       Image *part, int *bx, int *by, Image *rest, Color *mainColor, bool textMode)
 {
     Image img = ImageCopy(src);
     ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
@@ -336,11 +336,56 @@ int magic_extract_box(Image src, int x0, int y0, int x1, int y1, float tolerance
                 if (x > ax1) ax1 = x;
                 if (y < ay0) ay0 = y;
                 if (y > ay1) ay1 = y;
-                double w = dd;
-                sr += c.r * w; sg += c.g * w; sb += c.b * w; sw += w;
             }
         }
+    // Color principal: la media de los píxeles más distintos del fondo (el centro de las letras,
+    // no sus bordes suaves)
+    {
+        int maxd = 0;
+        for (int y = 0; y < bh; y++)
+            for (int x = 0; x < bw; x++) {
+                if (alpha[y * bw + x] < 1) continue;
+                int dd = color_dist(p[(y0 + y) * W + x0 + x], fill[y * bw + x]);
+                if (dd > maxd) maxd = dd;
+            }
+        for (int y = 0; y < bh; y++)
+            for (int x = 0; x < bw; x++) {
+                if (alpha[y * bw + x] < 1) continue;
+                Px c = p[(y0 + y) * W + x0 + x];
+                int dd = color_dist(c, fill[y * bw + x]);
+                if (dd < maxd * 0.75f) continue;
+                sr += c.r; sg += c.g; sb += c.b; sw += 1;
+            }
+    }
     if (ax1 < 0) { free(alpha); free(fill); UnloadImage(img); return 0; }
+    if (textMode && sw > 0) {
+        // Letras: solo cuenta lo que va del color del fondo al color de las letras.
+        // Así no se borran bordes de manchas o dibujos que haya en el recuadro.
+        float mr = (float)(sr / sw), mg = (float)(sg / sw), mb = (float)(sb / sw);
+        ax0 = bw; ay0 = bh; ax1 = -1; ay1 = -1;
+        for (int y = 0; y < bh; y++)
+            for (int x = 0; x < bw; x++) {
+                int i = y * bw + x;
+                Px c = p[(y0 + y) * W + x0 + x], f = fill[i];
+                float dr = mr - f.r, dg = mg - f.g, db = mb - f.b;
+                float len2 = dr * dr + dg * dg + db * db;
+                if (len2 < 1) { alpha[i] = 0; continue; }
+                float t = ((c.r - f.r) * dr + (c.g - f.g) * dg + (c.b - f.b) * db) / len2;
+                float er = f.r + dr * t - c.r, eg = f.g + dg * t - c.g, eb = f.b + db * t - c.b;
+                float resid = sqrtf(er * er + eg * eg + eb * eb);
+                float a = (t - 0.12f) / 0.6f;
+                if (resid > tol * 1.2f) a = 0;
+                a = a < 0 ? 0 : a > 1 ? 1 : a;
+                alpha[i] = a;
+                if (a > 0.5f) {
+                    if (x < ax0) ax0 = x;
+                    if (x > ax1) ax1 = x;
+                    if (y < ay0) ay0 = y;
+                    if (y > ay1) ay1 = y;
+                }
+            }
+        if (ax1 < 0) { free(alpha); free(fill); UnloadImage(img); return 0; }
+    }
     ax0 = ax0 > 1 ? ax0 - 2 : 0; ay0 = ay0 > 1 ? ay0 - 2 : 0;
     ax1 = ax1 < bw - 2 ? ax1 + 2 : bw - 1; ay1 = ay1 < bh - 2 ? ay1 + 2 : bh - 1;
     int pw = ax1 - ax0 + 1, ph = ay1 - ay0 + 1;
@@ -365,10 +410,39 @@ int magic_extract_box(Image src, int x0, int y0, int x1, int y1, float tolerance
     // En la imagen original, lo separado se sustituye por el fondo calculado
     unsigned char *m = (unsigned char *)calloc((size_t)bw * bh, 1);
     for (int i = 0; i < bw * bh; i++) m[i] = alpha[i] > 0 ? 1 : 0;
-    unsigned char *grown = dilate(m, bw, bh, 2);
+    unsigned char *grown = dilate(m, bw, bh, textMode ? 3 : 2);
+    // Primero el fondo calculado y luego lo suavizamos con lo que hay alrededor de cada letra,
+    // así se mantienen los degradados y las manchas de color del fondo
+    float *acc = (float *)malloc(sizeof(float) * 3 * bw * bh);
     for (int y = 0; y < bh; y++)
-        for (int x = 0; x < bw; x++)
-            if (grown[y * bw + x]) p[(y0 + y) * W + x0 + x] = fill[y * bw + x];
+        for (int x = 0; x < bw; x++) {
+            int i = y * bw + x;
+            Px c = grown[i] ? fill[i] : p[(y0 + y) * W + x0 + x];
+            acc[i * 3] = c.r; acc[i * 3 + 1] = c.g; acc[i * 3 + 2] = c.b;
+        }
+    for (int it = 0; it < 80; it++)
+        for (int y = 0; y < bh; y++)
+            for (int x = 0; x < bw; x++) {
+                int i = y * bw + x;
+                if (!grown[i]) continue;
+                float r = 0, g = 0, b = 0;
+                int n = 0;
+                int nb[4][2] = { { x - 1, y }, { x + 1, y }, { x, y - 1 }, { x, y + 1 } };
+                for (int k = 0; k < 4; k++) {
+                    int nx = nb[k][0], ny = nb[k][1];
+                    if (nx < 0 || ny < 0 || nx >= bw || ny >= bh) continue;
+                    int j = ny * bw + nx;
+                    r += acc[j * 3]; g += acc[j * 3 + 1]; b += acc[j * 3 + 2];
+                    n++;
+                }
+                if (n) { acc[i * 3] = r / n; acc[i * 3 + 1] = g / n; acc[i * 3 + 2] = b / n; }
+            }
+    for (int y = 0; y < bh; y++)
+        for (int x = 0; x < bw; x++) {
+            int i = y * bw + x;
+            if (grown[i]) p[(y0 + y) * W + x0 + x] = (Px){ (unsigned char)acc[i * 3], (unsigned char)acc[i * 3 + 1], (unsigned char)acc[i * 3 + 2], 255 };
+        }
+    free(acc);
     free(grown); free(m); free(alpha); free(fill);
 
     *part = (Image){ out, pw, ph, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
@@ -379,4 +453,16 @@ int magic_extract_box(Image src, int x0, int y0, int x1, int y1, float tolerance
         *mainColor = sw > 0 ? (Color){ (unsigned char)(sr / sw), (unsigned char)(sg / sw), (unsigned char)(sb / sw), 255 } : BLACK;
     }
     return 1;
+}
+
+int magic_extract_box(Image src, int x0, int y0, int x1, int y1, float tolerance,
+                      Image *part, int *bx, int *by, Image *rest, Color *mainColor)
+{
+    return extract_box(src, x0, y0, x1, y1, tolerance, part, bx, by, rest, mainColor, false);
+}
+
+int magic_extract_text(Image src, int x0, int y0, int x1, int y1, float tolerance,
+                       Image *part, int *bx, int *by, Image *rest, Color *textColor)
+{
+    return extract_box(src, x0, y0, x1, y1, tolerance, part, bx, by, rest, textColor, true);
 }

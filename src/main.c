@@ -398,6 +398,7 @@ static int import_svg_parts(const char *path, int mode, Vector2 center)
     for (int i = 0; i < n; i++) {
         int id = asset_add_image(parts[i].img);
         if (id < 0) continue;
+        g_assets[id].hidden = true;
         Element *e = doc_add(&A.doc, EL_IMAGE);
         if (!e) break;
         e->asset = id;
@@ -507,6 +508,7 @@ static bool import_pdf(const char *path)
         } else {
             int id = asset_add_image(it->img);
             if (id < 0) continue;
+            if (it->kind == PDF_SHAPE) g_assets[id].hidden = true;
             Element *e = doc_add(&A.doc, EL_IMAGE);
             if (!e) break;
             e->asset = id;
@@ -804,6 +806,8 @@ static void wand_at(int index, Vector2 w)
     UnloadImage(src);
     if (!ok) { toast("Ahí solo hay fondo. Toca encima de un dibujo o de un texto."); return; }
     int partId = asset_add_image(part), restId = asset_add_image(rest);
+    if (partId >= 0) g_assets[partId].hidden = true;
+    if (restId >= 0) g_assets[restId].hidden = true;
     float sx = e->w / (float)rest.width, sy = e->h / (float)rest.height;
     UnloadImage(part);
     UnloadImage(rest);
@@ -860,6 +864,8 @@ static void wand_box(int index, bool asText)
     int pw = part.width, ph = part.height;
     int restId = asset_add_image(rest);
     int partId = asText ? -1 : asset_add_image(part);
+    if (restId >= 0) g_assets[restId].hidden = true;
+    if (partId >= 0) g_assets[partId].hidden = true;
     UnloadImage(part);
     UnloadImage(rest);
     if (restId < 0 || (!asText && partId < 0)) { toast("No caben más imágenes en este diseño"); return; }
@@ -908,6 +914,272 @@ static void wand_box(int index, bool asText)
     }
 }
 
+// ---- Editar texto de la imagen: leer las letras (OCR), borrarlas y poner un texto igual ----
+
+typedef struct { float x, y, w, h; char text[400]; } OcrLine;
+
+static int run_ocr(Image src, int x0, int y0, int x1, int y1, OcrLine *lines, int max)
+{
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > src.width) x1 = src.width;
+    if (y1 > src.height) y1 = src.height;
+    if (x1 - x0 < 4 || y1 - y0 < 4) return 0;
+    Image crop = ImageFromImage(src, (Rectangle){ (float)x0, (float)y0, (float)(x1 - x0), (float)(y1 - y0) });
+    // El lector va mejor con letras grandes
+    float up = 1;
+    if (crop.height < 400) up = fminf(3.0f, 400.0f / crop.height);
+    // El lector de Windows no admite imágenes de más de unos 2600 px
+    float big = (float)(crop.width > crop.height ? crop.width : crop.height);
+    if (big * up > 2500) up = 2500 / big;
+    if (fabsf(up - 1) > 0.01f) ImageResize(&crop, (int)(crop.width * up), (int)(crop.height * up));
+    ImageFormat(&crop, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    // Sin transparencia (el lector se lía con ella)
+    unsigned char *px = (unsigned char *)crop.data;
+    for (int i = 0; i < crop.width * crop.height; i++) {
+        float a = px[i * 4 + 3] / 255.0f;
+        for (int k = 0; k < 3; k++) px[i * 4 + k] = (unsigned char)(px[i * 4 + k] * a + 255 * (1 - a));
+        px[i * 4 + 3] = 255;
+    }
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/lector.png", plat_data_dir());
+    int size = 0;
+    unsigned char *png = ExportImageToMemory(crop, ".png", &size);
+    UnloadImage(crop);
+    if (!png) return 0;
+    plat_write_file(path, png, size);
+    MemFree(png);
+    static char out[32768];
+    bool ok = plat_ocr(path, out, sizeof(out));
+    plat_delete_file(path);
+    if (!ok) return 0;
+    int n = 0;
+    for (char *l = out; *l && n < max;) {
+        char *nl = strchr(l, '\n');
+        if (nl) *nl = 0;
+        int lx, ly, lw, lh;
+        char *tab = strchr(l, '\t');
+        if (tab && sscanf(l, "%d %d %d %d", &lx, &ly, &lw, &lh) == 4 && lw > 0 && lh > 0) {
+            char *t = tab + 1;
+            while (*t == ' ') t++;
+            int len = (int)strlen(t);
+            while (len > 0 && (t[len - 1] == ' ' || t[len - 1] == '\r')) t[--len] = 0;
+            if (len > 0) {
+                lines[n].x = x0 + lx / up;
+                lines[n].y = y0 + ly / up;
+                lines[n].w = lw / up;
+                lines[n].h = lh / up;
+                snprintf(lines[n].text, sizeof(lines[n].text), "%s", t);
+                n++;
+            }
+        }
+        if (!nl) break;
+        l = nl + 1;
+    }
+    return n;
+}
+
+// Busca entre nuestras fuentes la que dibuja ese texto con una forma más parecida a la de la
+// imagen. mask: transparencia de las letras recortadas (mw x mh). Devuelve la fuente, y en
+// size / topOff el tamaño y lo que queda por encima de las letras.
+static int match_font_shape(const char *text, const unsigned char *mask, int mw, int mh, float *size, float *topOff)
+{
+    int best = 0;
+    float bestScore = -1;
+    *size = mh / 0.75f;
+    *topOff = 0;
+    // Máscaras reducidas a una rejilla (media de cada celda) para comparar rápido
+    const int GW = 96, GH = 24;
+    float target[96 * 24] = { 0 };
+    float tInk = 0;
+    for (int y = 0; y < mh; y++)
+        for (int x = 0; x < mw; x++) target[(y * GH / mh) * GW + x * GW / mw] += mask[y * mw + x] / 255.0f;
+    {
+        float cellArea = ((float)mw / GW) * ((float)mh / GH);
+        for (int i = 0; i < GW * GH; i++) { target[i] = fminf(1, target[i] / cellArea); tInk += target[i]; }
+        tInk /= GW * GH;
+    }
+    float targetAspect = (float)mw / mh;
+    for (int fi = 0; fi < g_fontCount; fi++) {
+        Font f = font_get(fi);
+        if (f.texture.id == 0 || g_fonts[fi].failed) continue;
+        const float S = 100;
+        Image im = ImageTextEx(f, text, S, S * 0.02f, WHITE);
+        if (!im.data) continue;
+        ImageFormat(&im, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+        unsigned char *p = (unsigned char *)im.data;
+        int x0 = im.width, y0 = im.height, x1 = -1, y1 = -1;
+        for (int y = 0; y < im.height; y++)
+            for (int x = 0; x < im.width; x++)
+                if (p[(y * im.width + x) * 4 + 3] > 100) {
+                    if (x < x0) x0 = x;
+                    if (x > x1) x1 = x;
+                    if (y < y0) y0 = y;
+                    if (y > y1) y1 = y;
+                }
+        if (x1 < 0) { UnloadImage(im); continue; }
+        int rw = x1 - x0 + 1, rh = y1 - y0 + 1;
+        float aspect = (float)rw / rh;
+        float grid[96 * 24] = { 0 };
+        for (int y = 0; y < rh; y++)
+            for (int x = 0; x < rw; x++) grid[(y * GH / rh) * GW + x * GW / rw] += p[((y0 + y) * im.width + x0 + x) * 4 + 3] / 255.0f;
+        float cellArea = ((float)rw / GW) * ((float)rh / GH), rInk = 0;
+        float inter = 0, uni = 0;
+        for (int i = 0; i < GW * GH; i++) {
+            float a = fminf(1, grid[i] / cellArea), b = target[i];
+            rInk += a;
+            inter += fminf(a, b);
+            uni += fmaxf(a, b);
+        }
+        rInk /= GW * GH;
+        float iou = uni > 0 ? inter / uni : 0;
+        // Que también se parezca la proporción (lo ancha que es) y el grosor (cuánta tinta lleva)
+        float ar = fminf(aspect, targetAspect) / fmaxf(aspect, targetAspect);
+        float ink = (tInk > 0 && rInk > 0) ? fminf(tInk, rInk) / fmaxf(tInk, rInk) : 0;
+        float score = iou * 0.45f + ar * 0.3f + ink * 0.25f;
+        if (score > bestScore) {
+            bestScore = score;
+            best = fi;
+            *size = S * mh / rh;
+            *topOff = y0 * (*size / S);
+        }
+        UnloadImage(im);
+    }
+    return best;
+}
+
+static void edit_text_box(int index)
+{
+    Element *e = &A.doc.el[index];
+    if (e->asset < 0 || e->asset >= g_assetCount) return;
+    Asset *as = &g_assets[e->asset];
+    Image src = LoadImageFromMemory(".png", as->png, as->pngSize);
+    if (!src.data) return;
+    int x0, y0, x1, y1;
+    box_to_pixels(e, src.width, src.height, &x0, &y0, &x1, &y1);
+    static OcrLine lines[64];
+    int n = run_ocr(src, x0, y0, x1, y1, lines, 64);
+    if (n == 0) {
+        UnloadImage(src);
+        // Sin lector: borramos y dejamos un texto vacío como antes
+        wand_box(index, true);
+        toast("No he podido leer las letras: escribe tú el texto. (Necesita Windows 10 u 11 con el idioma español)");
+        return;
+    }
+    // Borrar cada renglón por separado (así no se tocan los dibujos de alrededor)
+    Image work = ImageCopy(src);
+    Color main = BLACK;
+    bool gotColor = false;
+    int longest = 0;
+    unsigned char *mask = NULL;
+    int mw = 0, mh = 0;
+    for (int i = 0; i < n; i++) if (strlen(lines[i].text) > strlen(lines[longest].text)) longest = i;
+    for (int i = 0; i < n; i++) {
+        float pad = lines[i].h * 0.3f + 2, padY = lines[i].h * 0.06f + 1;
+        int lx0 = (int)(lines[i].x - pad), ly0 = (int)(lines[i].y - padY);
+        int lx1 = (int)(lines[i].x + lines[i].w + pad), ly1 = (int)(lines[i].y + lines[i].h + padY);
+        Image part, rest;
+        int bx, by;
+        Color c;
+        if (!magic_extract_text(work, lx0, ly0, lx1, ly1, A.wandTol, &part, &bx, &by, &rest, &c)) continue;
+#if defined(LIENZO_TESTS)
+        printf("renglon %d: %.0f %.0f %.0f %.0f color %02X%02X%02X '%s'\n", i, lines[i].x, lines[i].y, lines[i].w, lines[i].h, c.r, c.g, c.b, lines[i].text);
+#endif
+        // Nos quedamos con el color que más contrasta con el fondo (el de las letras de verdad)
+        {
+            Color bg = GetImageColor(work, lx0 < 0 ? 0 : lx0, ly0 < 0 ? 0 : ly0);
+            float d = fabsf((c.r + c.g + c.b) - (float)(bg.r + bg.g + bg.b));
+            static float bestD;
+            if (!gotColor || d > bestD) { main = c; bestD = d; gotColor = true; }
+        }
+        if (i == longest) {
+            // Máscara de las letras dentro de la caja del renglón
+            mw = (int)lines[i].w; mh = (int)lines[i].h;
+            if (mw > 2 && mh > 2) {
+                mask = (unsigned char *)calloc((size_t)mw * mh, 1);
+                unsigned char *pp = (unsigned char *)part.data;
+                for (int y = 0; y < mh; y++)
+                    for (int x = 0; x < mw; x++) {
+                        int px = (int)lines[i].x + x - bx, py = (int)lines[i].y + y - by;
+                        if (px >= 0 && py >= 0 && px < part.width && py < part.height) mask[y * mw + x] = pp[(py * part.width + px) * 4 + 3];
+                    }
+            }
+        }
+        UnloadImage(part);
+        UnloadImage(work);
+        work = rest;
+    }
+    UnloadImage(src);
+    // Elegir la fuente y el tamaño
+    float size = lines[longest].h / 0.75f, topOff = 0;
+    int font = font_find("Moderna");
+    if (font < 0) font = 0;
+    if (mask) {
+        font = match_font_shape(lines[longest].text, mask, mw, mh, &size, &topOff);
+        free(mask);
+    }
+    float sx = e->w / (float)work.width, sy = e->h / (float)work.height;
+    int restId = asset_add_image(work);
+    UnloadImage(work);
+    if (restId < 0) { toast("No caben más imágenes en este diseño"); return; }
+    begin_change();
+    e = &A.doc.el[index];
+    Element orig = *e;
+    e->asset = restId;
+    g_assets[restId].hidden = true;
+    Element *t = doc_add(&A.doc, EL_TEXT);
+    if (!t) return;
+    // Texto: renglones unidos; alineación según cómo empiezan y acaban los renglones
+    t->text[0] = 0;
+    float minL = 1e9f, maxR = -1e9f, maxW = 0;
+    for (int i = 0; i < n; i++) {
+        if (i) strncat(t->text, "\n", TEXT_MAX - strlen(t->text) - 1);
+        strncat(t->text, lines[i].text, TEXT_MAX - strlen(t->text) - 1);
+        minL = fminf(minL, lines[i].x);
+        maxR = fmaxf(maxR, lines[i].x + lines[i].w);
+        maxW = fmaxf(maxW, lines[i].w);
+    }
+    int align = ALIGN_LEFT;
+    if (n > 1) {
+        float dl = 0, dr = 0, dc = 0, mc = (minL + maxR) / 2;
+        for (int i = 0; i < n; i++) {
+            dl = fmaxf(dl, fabsf(lines[i].x - minL));
+            dr = fmaxf(dr, fabsf(lines[i].x + lines[i].w - maxR));
+            dc = fmaxf(dc, fabsf(lines[i].x + lines[i].w / 2 - mc));
+        }
+        if (dc < dl && dc <= dr) align = ALIGN_CENTER;
+        else if (dr < dl) align = ALIGN_RIGHT;
+    } else align = ALIGN_CENTER;
+    // Todo en píxeles de la imagen; luego pasamos al lienzo
+    float k = sy;
+    t->font = font;
+    t->fontSize = fmaxf(6, roundf(size * k));
+    t->fill = main;
+    t->align = align;
+    if (n > 1) {
+        float step = (lines[n - 1].y - lines[0].y) / (n - 1);
+        t->lineSpacing = step / size;
+        if (t->lineSpacing < 0.6f || t->lineSpacing > 3) t->lineSpacing = 0;
+    }
+    float ls = t->lineSpacing > 0.3f ? t->lineSpacing : 1.18f;
+    float boxW = (maxR - minL) * sx;
+    t->w = boxW * 1.12f + t->fontSize * 0.4f;
+    float left = minL * sx, right = maxR * sx;
+    float lx = align == ALIGN_CENTER ? (left + right) / 2 - t->w / 2 : align == ALIGN_RIGHT ? right - t->w : left - t->fontSize * 0.05f;
+    float ty = lines[0].y * sy - (t->fontSize * (ls - 1) / 2 + topOff * k);
+    fix_text_height(t);
+    t->rotation = orig.rotation;
+    // Posición dentro de la imagen (por si la imagen no empieza en 0,0 o está girada)
+    Vector2 lc = { lx + t->w / 2 - orig.w / 2, ty + t->h / 2 - orig.h / 2 };
+    Vector2 c = to_world(&orig, lc);
+    t->x = c.x - t->w / 2;
+    t->y = c.y - t->h / 2;
+    int ni = doc_move_layer(&A.doc, A.doc.count - 1, index + 1 - (A.doc.count - 1));
+    A.fixText = false;
+    select_index(ni);
+    toast("Texto leído: haz doble clic para cambiarlo. Arriba puedes cambiar la letra, el tamaño y el color.");
+}
+
 static void canvas_input(Rectangle cr)
 {
     Vector2 m = GetMousePosition();
@@ -944,7 +1216,8 @@ static void canvas_input(Rectangle cr)
             bool click = fabsf(a.x - b.x) < 6 && fabsf(a.y - b.y) < 6;
             if (click && A.wand) wand_at(A.sel, A.boxStart);
             else if (click) toast("Arrastra para rodear el texto que quieres corregir");
-            else wand_box(A.sel, A.fixText);
+            else if (A.fixText) edit_text_box(A.sel);
+            else wand_box(A.sel, false);
         }
         return;
     }
@@ -2097,8 +2370,11 @@ static float panel_images(float x, float y, float w)
         return y + 30;
     }
     float cw = (w - 10) / 2;
+    int shown = 0;
     for (int i = 0; i < g_assetCount; i++) {
-        Rectangle cell = { x + (i % 2) * (cw + 10), y + (i / 2) * (cw * 0.8f + 10), cw, cw * 0.8f };
+        if (g_assets[i].hidden) continue;
+        int k = shown++;
+        Rectangle cell = { x + (k % 2) * (cw + 10), y + (k / 2) * (cw * 0.8f + 10), cw, cw * 0.8f };
         bool hover = ui_hover(cell);
         DrawRectangleRounded(cell, 0.08f, 6, COL_HOVER);
         Texture2D t = g_assets[i].tex;
@@ -2108,7 +2384,7 @@ static float panel_images(float x, float y, float w)
         if (hover) DrawRectangleRoundedLinesEx(cell, 0.08f, 6, 2, COL_ACCENT);
         if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) add_image_asset(i, doc_center());
     }
-    return y + ((g_assetCount + 1) / 2) * (cw * 0.8f + 10);
+    return y + ((shown + 1) / 2) * (cw * 0.8f + 10);
 }
 
 static void element_label(const Element *e, char *out, int max)
@@ -2354,13 +2630,13 @@ static void draw_toolbar(void)
             if (A.wand) toast("Toca un dibujo, o rodéalo arrastrando, para separarlo del fondo");
         }
         x += 150;
-        Rectangle fb2 = { x, y + 10, 150, 36 };
-        if (ui_button(fb2, A.fixText ? "Terminar" : "Corregir texto", A.fixText ? BTN_PRIMARY : BTN_NORMAL)) {
+        Rectangle fb2 = { x, y + 10, 210, 36 };
+        if (ui_button(fb2, A.fixText ? "Terminar" : "Editar texto de la imagen", A.fixText ? BTN_PRIMARY : BTN_NORMAL)) {
             A.fixText = !A.fixText;
             A.wand = false;
             if (A.fixText) toast("Rodea arrastrando el texto que quieres cambiar: se borra y podrás escribirlo de nuevo");
         }
-        x += 164;
+        x += 224;
         if (A.wand || A.fixText) {
             tb_label("Parecido al fondo", x, y);
             ui_slider(5, (Rectangle){ x + 4, y + 30, 120 - 8, 12 }, &A.wandTol, 0, 1);
@@ -2588,12 +2864,15 @@ static void test_step(const char *dir, int frame)
     }
     case 225: test_shot(dir, "17_lapiz"); break;
     case 226: {
-        // Corregir la primera línea del texto gris
-        A.boxStart = (Vector2){ 232, 368 }; A.boxEnd = (Vector2){ 1058, 418 };
-        wand_box(0, true);
-        Element *t = selected();
-        if (t) { snprintf(t->text, TEXT_MAX, "HOY VAMOS A APUNTAR ALGUNAS"); fix_text_height(t); }
+        // Leer y rehacer el texto gris (3 renglones) y el título marrón
+        A.boxStart = (Vector2){ 225, 362 }; A.boxEnd = (Vector2){ 1065, 535 };
+        edit_text_box(0);
+        A.boxStart = (Vector2){ 195, 190 }; A.boxEnd = (Vector2){ 1095, 310 };
+        select_index(0);
+        edit_text_box(0);
+        for (int i = 0; i < A.doc.count; i++) if (A.doc.el[i].type == EL_TEXT) printf("TEXTO fuente=%s tam=%.0f interl=%.2f al=%d color=%02X%02X%02X \"%s\"\n", font_name(A.doc.el[i].font), A.doc.el[i].fontSize, A.doc.el[i].lineSpacing, A.doc.el[i].align, A.doc.el[i].fill.r, A.doc.el[i].fill.g, A.doc.el[i].fill.b, A.doc.el[i].text);
         stop_editing();
+        select_index(0);
         // Separar la espiral de la izquierda y el teléfono
         select_index(0);
         A.boxStart = (Vector2){ 30, 555 }; A.boxEnd = (Vector2){ 108, 635 };
@@ -2609,7 +2888,7 @@ static void test_step(const char *dir, int frame)
         select_index(-1);
         break;
     }
-    case 230: test_shot(dir, "18_lapiz_separado"); break;
+    case 230: test_shot(dir, "18_lapiz_separado"); { char p[1200]; snprintf(p, sizeof(p), "%s/texto_editado.png", dir); export_png(&A.doc, p); } break;
     case 232: {
         const char *pdf = getenv("LIENZO_TEST_PDF");
         if (!pdf) { A.quit = true; break; }

@@ -66,6 +66,7 @@ typedef struct {
     int w, h;
     unsigned char *mask;   // transparencia reducida (para saber si se ha hecho clic encima)
     int mw, mh;
+    bool hidden;           // no sale en "Imágenes usadas" (trozos del lápiz, partes de SVG/PDF...)
 } Asset;
 
 extern Asset g_assets[MAX_ASSETS];
