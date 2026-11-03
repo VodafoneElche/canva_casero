@@ -37,6 +37,11 @@ int plat_list_dir(const char *dir, const char *ext, char (*names)[260], int max)
 // Devuelve false si no se ha podido (por ejemplo, Windows sin el idioma instalado).
 bool plat_ocr(const char *const *paths, int count, char *out, int max);
 
+// Baja un archivo de internet (https) a "path". false si no hay internet o falla.
+bool plat_download(const char *url, const char *path);
+// Abre un archivo con su programa (un instalador .exe se ejecuta)
+bool plat_run_file(const char *path);
+
 void plat_message(const char *title, const char *msg);
 // 1 = sí, 0 = no, -1 = cancelar
 int plat_ask_yes_no_cancel(const char *title, const char *msg);

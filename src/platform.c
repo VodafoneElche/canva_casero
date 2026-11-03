@@ -11,6 +11,8 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <shlobj.h>
+#include <shellapi.h>
+#include <urlmon.h>
 
 static wchar_t *to_wide(const char *s)
 {
@@ -269,6 +271,22 @@ bool plat_ocr(const char *const *paths, int count, char *out, int max)
     return true;
 }
 
+bool plat_download(const char *url, const char *path)
+{
+    wchar_t *u = to_wide(url), *p = to_wide(path);
+    HRESULT r = URLDownloadToFileW(NULL, u, p, 0, NULL);
+    free(u); free(p);
+    return r == S_OK;
+}
+
+bool plat_run_file(const char *path)
+{
+    wchar_t *p = to_wide(path);
+    INT_PTR r = (INT_PTR)ShellExecuteW(NULL, L"open", p, NULL, NULL, SW_SHOWNORMAL);
+    free(p);
+    return r > 32;
+}
+
 void plat_message(const char *title, const char *msg)
 {
     wchar_t *t = to_wide(title), *m = to_wide(msg);
@@ -427,6 +445,20 @@ bool plat_ocr(const char *const *paths, int count, char *out, int max)
     pclose(p);
     }
     return any;
+}
+
+bool plat_download(const char *url, const char *path)
+{
+    char cmd[3000];
+    snprintf(cmd, sizeof(cmd), "curl -fsSL --max-time 120 -o '%s' '%s' 2>/dev/null", path, url);
+    return system(cmd) == 0 && plat_file_exists(path);
+}
+
+bool plat_run_file(const char *path)
+{
+    char cmd[1400];
+    snprintf(cmd, sizeof(cmd), "xdg-open '%s' >/dev/null 2>&1 &", path);
+    return system(cmd) == 0;
 }
 
 void plat_message(const char *title, const char *msg)

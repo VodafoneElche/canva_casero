@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(LienzoCasero VERSION 0.9.0 LANGUAGES C)
+project(LienzoCasero VERSION 0.9.1 LANGUAGES C)
 if(WIN32)
     enable_language(RC)
 endif()
@@ -29,6 +29,8 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(raylib)
 
+add_compile_definitions(APP_VERSION="${PROJECT_VERSION}")
+
 set(SOURCES
     src/main.c
     src/doc.c
@@ -36,7 +38,7 @@ set(SOURCES
     src/ui.c
     src/templates.c
     src/platform.c
-    src/svg.c src/magic.c src/pdf.c src/eps.c
+    src/svg.c src/magic.c src/pdf.c src/eps.c src/update.c
 )
 # nanosvg es código de otra persona: sin avisos
 set_source_files_properties(src/svg.c PROPERTIES COMPILE_OPTIONS "-w")
@@ -45,7 +47,7 @@ if(WIN32)
     # Icono y datos del programa (los usa Windows en el Explorador y la barra de tareas)
     list(APPEND SOURCES assets/lienzo.rc)
     add_executable(LienzoCasero WIN32 ${SOURCES})
-    target_link_libraries(LienzoCasero PRIVATE raylib comdlg32 shell32 ole32 winmm gdi32)
+    target_link_libraries(LienzoCasero PRIVATE raylib comdlg32 shell32 ole32 urlmon winmm gdi32)
     if(MINGW)
         # Sin dependencias de DLL de MinGW: un solo .exe
         target_link_options(LienzoCasero PRIVATE -static -static-libgcc)
@@ -56,7 +58,7 @@ if(WIN32)
     endif()
 else()
     add_executable(LienzoCasero ${SOURCES})
-    target_link_libraries(LienzoCasero PRIVATE raylib m)
+    target_link_libraries(LienzoCasero PRIVATE raylib m pthread)
 endif()
 
 if(NOT MSVC)

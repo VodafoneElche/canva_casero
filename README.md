@@ -43,16 +43,23 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 
 ## Instalarlo en Windows
 
-1. Entra en la pestaña **Actions** del repositorio, abre la última ejecución correcta de
-   "Compilar" y descarga `LienzoCasero-instalador-windows`.
-   (Cuando se publique una versión, también estará en **Releases**.)
-2. Descomprime el zip y ejecuta `LienzoCasero-0.9.0-instalador.exe`.
+1. Descarga el instalador de la última versión en
+   [Releases](https://github.com/VodafoneElche/canva_casero/releases/latest).
+2. Ejecuta `LienzoCasero-0.9.1-instalador.exe`.
 3. Windows puede avisar con "Windows protegió su PC" porque el programa no está firmado:
    pulsa **Más información** y luego **Ejecutar de todas formas**.
 
 El instalador crea un acceso directo en el escritorio y en el menú Inicio, y hace que los
 archivos `.lienzo` se abran con doble clic. Se desinstala desde *Configuración > Aplicaciones*.
 Los diseños y plantillas de cada persona se guardan en `%APPDATA%\LienzoCasero`.
+
+**Actualizaciones**: al abrirse, el programa mira en Releases si hay una versión nueva. Si la
+hay, aparece abajo el botón "Actualizar a la versión...": baja el instalador, cierra el
+programa y lo abre. También se puede buscar a mano en *Archivo > Buscar actualizaciones*.
+
+Para publicar una versión nueva: subir el número en `CMakeLists.txt` (y en `assets/lienzo.rc`
+e `installer/lienzo-casero.nsi`), y crear una etiqueta `vX.Y.Z` en `main`. GitHub Actions
+compila el instalador y lo publica en Releases.
 
 ## Atajos de teclado
 
@@ -110,6 +117,7 @@ cmake -B build && cmake --build build && ./build/LienzoCasero
 | `src/ui.c` | Botones, deslizadores y casillas de texto |
 | `src/svg.c` | Leer SVG y separarlos en partes |
 | `src/eps.c` | Leer dibujos EPS (y .ai antiguos) y pasarlos a SVG |
+| `src/update.c` | Buscar en GitHub si hay una versión nueva y bajar el instalador |
 | `src/pdf.c` | Leer PDF y sacar sus imágenes, formas y textos |
 | `src/magic.c` | Lápiz mágico y corregir texto |
 | `src/platform.c` | Ventanas de Abrir/Guardar de Windows y archivos con tildes |

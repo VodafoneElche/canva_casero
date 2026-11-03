@@ -9,6 +9,7 @@
 #include "magic.h"
 #include "pdf.h"
 #include "eps.h"
+#include "update.h"
 #include "svg.h"
 #include "templates.h"
 #include "ui.h"
@@ -2423,13 +2424,56 @@ static bool menu_item(Rectangle r, const char *label, const char *hint)
     return hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
 }
 
+// ------------------------------------------------------------------ Actualizaciones
+
+static bool g_updManual;   // la búsqueda la pidió el usuario: avisar también si no hay nada
+
+static void run_installer(void)
+{
+    if (!confirm_discard()) return;
+    if (plat_run_file(update_installer())) A.quit = true;
+    else plat_message(APP_NAME, "No se ha podido abrir el instalador de la versión nueva.");
+}
+
+static void cmd_check_updates(void)
+{
+    UpdateState st = update_state();
+    if (st == UPD_READY) { run_installer(); return; }
+    if (st == UPD_AVAILABLE || st == UPD_FAILED) { update_download(); return; }
+    if (st == UPD_CHECKING || st == UPD_DOWNLOADING) { toast("Un momento, estoy en ello..."); return; }
+    g_updManual = true;
+    toast("Buscando una versión nueva...");
+    update_check(APP_VERSION);
+}
+
+// Cada fotograma: avisa de lo que va pasando y, con el instalador bajado, lo abre
+static void update_tick(void)
+{
+    static UpdateState last = UPD_IDLE;
+    UpdateState st = update_state();
+    if (st == last) return;
+    last = st;
+    char m[200];
+    if (st == UPD_AVAILABLE) {
+        snprintf(m, sizeof(m), "Hay una versión nueva (%s). Pulsa el botón de abajo para actualizar.", update_version());
+        toast(m);
+    } else if (st == UPD_LATEST && g_updManual) {
+        toast("Ya tienes la última versión (" APP_VERSION ").");
+    } else if (st == UPD_FAILED) {
+        toast("No se ha podido bajar la versión nueva. Mira si hay internet y vuelve a probar.");
+    } else if (st == UPD_READY) {
+        run_installer();
+    }
+    if (st != UPD_CHECKING) g_updManual = false;
+}
+
 static void draw_popup(void)
 {
     if (A.popup == POP_NONE) return;
     ui_set_layer(1);
     Rectangle r = { 0 };
     if (A.popup == POP_FILE) {
-        r = popup_place(A.popupAnchor, 300, 7 * 42 + 16);
+        r = popup_place(A.popupAnchor, 300, 8 * 42 + 16);
         popup_card(r);
         float y = r.y + 8;
         PopupId keep = POP_NONE;
@@ -2444,6 +2488,8 @@ static void draw_popup(void)
         if (menu_item((Rectangle){ r.x + 8, y, r.width - 16, 40 }, "Guardar como...", "Ctrl+Mayús+S")) { A.popup = POP_NONE; cmd_save(true); }
         y += 42;
         if (menu_item((Rectangle){ r.x + 8, y, r.width - 16, 40 }, "Guardar como plantilla...", NULL)) { A.modal = MODAL_SAVE_TEMPLATE; A.templateName[0] = 0; ui_focus_textbox(100); }
+        y += 42;
+        if (menu_item((Rectangle){ r.x + 8, y, r.width - 16, 40 }, "Buscar actualizaciones", "v" APP_VERSION)) { A.popup = POP_NONE; cmd_check_updates(); }
         y += 42;
         if (menu_item((Rectangle){ r.x + 8, y, r.width - 16, 40 }, "Salir", NULL)) A.quit = true;
         if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), r)) A.popup = keep;
@@ -3484,6 +3530,17 @@ static void draw_bottombar(void)
     Rectangle bb = { cr.x, cr.y + cr.height, cr.width, BOTTOM_H };
     DrawRectangleRec(bb, COL_PANEL);
     DrawLine((int)bb.x, (int)bb.y, (int)(bb.x + bb.width), (int)bb.y, COL_BORDER);
+    UpdateState us = update_state();
+    if (us == UPD_AVAILABLE || us == UPD_FAILED || us == UPD_READY) {
+        char t[120];
+        snprintf(t, sizeof(t), us == UPD_FAILED ? "Volver a probar a bajar la versión %s" : "Actualizar a la versión %s", update_version());
+        if (ui_button((Rectangle){ bb.x + 10, bb.y + 4, 330, 32 }, t, BTN_PRIMARY)) cmd_check_updates();
+        ui_text("Se cierra el programa y se abre el instalador.", bb.x + 354, bb.y + 11, 14, COL_MUTED);
+    } else if (us == UPD_DOWNLOADING) {
+        char t[120];
+        snprintf(t, sizeof(t), "Bajando la versión %s...", update_version());
+        ui_text_bold(t, bb.x + 16, bb.y + 11, 14, COL_ACCENT);
+    } else
     ui_text("Rueda: mover  ·  Ctrl + rueda: zoom  ·  Botón derecho o Espacio: arrastrar la vista  ·  Doble clic: escribir", bb.x + 16, bb.y + 11, 14, COL_MUTED);
     float x = bb.x + bb.width - 16 - 300;
     if (x < bb.x + 560) return;
@@ -3796,8 +3853,12 @@ int main(int argc, char **argv)
     int frame = 0;
 #endif
 
+    // Mirar en internet si hay una versión nueva (en segundo plano)
+    if (!getenv("LIENZO_TEST") && !getenv("LIENZO_SIN_ACTUALIZAR")) update_check(APP_VERSION);
+
     bool firstFrame = true;
     while (!A.quit) {
+        update_tick();
 #if defined(LIENZO_TESTS)
         if (testDir) test_step(testDir, frame++);
 #endif
