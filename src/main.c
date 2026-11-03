@@ -105,6 +105,10 @@ static struct {
     char templateName[128];
     bool wand;              // lápiz mágico activo
     bool fixText;           // corregir un texto de una imagen
+    bool ocrMode;           // textos de la imagen ya leídos y marcados para tocarlos
+    int ocrElem, ocrAsset;  // imagen a la que pertenecen
+    int ocrPending;         // frames que faltan para leer (así antes se ve el aviso)
+    bool replaceOnType;     // al escribir se cambia todo el texto (recién sacado de la imagen)
     float wandTol;
     bool boxDrag;           // dibujando un recuadro con el lápiz
     Vector2 boxStart, boxEnd;
@@ -194,6 +198,7 @@ static void zoom_at(Vector2 screen, float factor)
 
 static void stop_editing(void)
 {
+    A.replaceOnType = false;
     A.editing = false;
     A.editPushed = false;
 }
@@ -938,6 +943,11 @@ static bool ocr_junk(const char *t)
 
 static char g_ocrError[300];
 
+// Lee las letras de una zona de la imagen. Una zona grande se parte en trozos que se
+// solapan (el lector de Windows no admite imágenes de más de unos 2600 px y lee mejor las
+// letras grandes); luego se juntan las palabras en renglones.
+typedef struct { int x, y, w, h, tile, line; char t[120]; } OcrWord;
+
 static int run_ocr(Image src, int x0, int y0, int x1, int y1, OcrLine *lines, int max)
 {
     if (x0 < 0) x0 = 0;
@@ -945,74 +955,132 @@ static int run_ocr(Image src, int x0, int y0, int x1, int y1, OcrLine *lines, in
     if (x1 > src.width) x1 = src.width;
     if (y1 > src.height) y1 = src.height;
     if (x1 - x0 < 4 || y1 - y0 < 4) return 0;
-    Image crop = ImageFromImage(src, (Rectangle){ (float)x0, (float)y0, (float)(x1 - x0), (float)(y1 - y0) });
-    // El lector va mejor con letras grandes
-    float up = 1;
-    if (crop.height < 400) up = fminf(3.0f, 400.0f / crop.height);
-    // El lector de Windows no admite imágenes de más de unos 2600 px
-    float big = (float)(crop.width > crop.height ? crop.width : crop.height);
-    if (big * up > 2500) up = 2500 / big;
-    if (fabsf(up - 1) > 0.01f) ImageResize(&crop, (int)(crop.width * up), (int)(crop.height * up));
-    ImageFormat(&crop, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
-    // Sin transparencia (el lector se lía con ella)
-    unsigned char *px = (unsigned char *)crop.data;
-    for (int i = 0; i < crop.width * crop.height; i++) {
-        float a = px[i * 4 + 3] / 255.0f;
-        for (int k = 0; k < 3; k++) px[i * 4 + k] = (unsigned char)(px[i * 4 + k] * a + 255 * (1 - a));
-        px[i * 4 + 3] = 255;
-    }
-    char path[1200];
+    int rw = x1 - x0, rh = y1 - y0;
+    // Trozos de como mucho TILE px que se solapan OVER px
+    const int TILE = 1100, OVER = 300;
+    int nx = rw <= TILE ? 1 : 1 + (rw - TILE + (TILE - OVER) - 1) / (TILE - OVER);
+    int ny = rh <= TILE ? 1 : 1 + (rh - TILE + (TILE - OVER) - 1) / (TILE - OVER);
+    if (nx * ny > 24) { nx = nx > 4 ? 4 : nx; ny = ny > 6 ? 6 : ny; }
+    int tw = nx == 1 ? rw : (rw + (nx - 1) * OVER + nx - 1) / nx;
+    int th = ny == 1 ? rh : (rh + (ny - 1) * OVER + ny - 1) / ny;
+    int ntiles = nx * ny;
+    static char paths[24][1200];
+    const char *pp[24];
+    int tx0[24], ty0[24], tx1[24], ty1[24];
+    float ups[24];
+    int made = 0;
+    for (int j = 0; j < ny; j++)
+        for (int i = 0; i < nx; i++) {
+            int k = j * nx + i;
+            int ax = x0 + (nx == 1 ? 0 : i * (rw - tw) / (nx - 1));
+            int ay = y0 + (ny == 1 ? 0 : j * (rh - th) / (ny - 1));
+            int bw = tw < rw ? tw : rw, bh = th < rh ? th : rh;
+            tx0[k] = ax; ty0[k] = ay; tx1[k] = ax + bw; ty1[k] = ay + bh;
+            Image crop = ImageFromImage(src, (Rectangle){ (float)ax, (float)ay, (float)bw, (float)bh });
+            // El lector va mejor con letras grandes
+            float up = 1;
+            if (crop.height < 400) up = fminf(3.0f, 400.0f / crop.height);
+            else up = 2;
+            float big = (float)(crop.width > crop.height ? crop.width : crop.height);
+            if (big * up > 2500) up = 2500 / big;
+            if (up < 1) up = 1;
+            ups[k] = up;
+            if (fabsf(up - 1) > 0.01f) ImageResize(&crop, (int)(crop.width * up), (int)(crop.height * up));
+            ImageFormat(&crop, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+            // Sin transparencia (el lector se lía con ella)
+            unsigned char *px = (unsigned char *)crop.data;
+            for (int q = 0; q < crop.width * crop.height; q++) {
+                float a = px[q * 4 + 3] / 255.0f;
+                for (int c = 0; c < 3; c++) px[q * 4 + c] = (unsigned char)(px[q * 4 + c] * a + 255 * (1 - a));
+                px[q * 4 + 3] = 255;
+            }
 #if defined(_WIN32)
-    snprintf(path, sizeof(path), "%s\\lector.png", plat_data_dir());
+            snprintf(paths[k], sizeof(paths[k]), "%s\\lector%d.png", plat_data_dir(), k);
 #else
-    snprintf(path, sizeof(path), "%s/lector.png", plat_data_dir());
+            snprintf(paths[k], sizeof(paths[k]), "%s/lector%d.png", plat_data_dir(), k);
 #endif
-    int size = 0;
-    unsigned char *png = ExportImageToMemory(crop, ".png", &size);
-    UnloadImage(crop);
-    if (!png) return 0;
-    plat_write_file(path, png, size);
-    MemFree(png);
-    static char out[32768];
-    bool ok = plat_ocr(path, out, sizeof(out));
-    plat_delete_file(path);
+            int size = 0;
+            unsigned char *png = ExportImageToMemory(crop, ".png", &size);
+            UnloadImage(crop);
+            if (!png) continue;
+            plat_write_file(paths[k], png, size);
+            MemFree(png);
+            pp[k] = paths[k];
+            made++;
+        }
+    if (made < ntiles) { for (int k = 0; k < ntiles; k++) plat_delete_file(paths[k]); return 0; }
+    static char out[262144];
+    bool ok = plat_ocr(pp, ntiles, out, sizeof(out));
+    for (int k = 0; k < ntiles; k++) plat_delete_file(paths[k]);
     g_ocrError[0] = 0;
     if (!ok) {
         snprintf(g_ocrError, sizeof(g_ocrError), "%s", strncmp(out, "ERROR ", 6) == 0 ? out + 6 : out[0] ? out : "sin respuesta");
         for (char *q = g_ocrError; *q; q++) if (*q == '\r' || *q == '\n') *q = ' ';
         return 0;
     }
-    // Una fila por palabra: "renglón x y ancho alto<TAB>palabra"
-    typedef struct { int line, x, y, w, h; char t[120]; } OcrWord;
-    static OcrWord words[1500];
-    int nw = 0;
-    for (char *l = out; *l && nw < 1500;) {
+    // Palabras, ya en píxeles de la imagen. De cada trozo solo nos quedamos con las palabras
+    // cuyo centro cae en su parte "propia" (sin la mitad del solape), para no repetirlas.
+    static OcrWord words[3000];
+    int nw = 0, tile = -1;
+    for (char *l = out; *l && nw < 3000;) {
         char *nl = strchr(l, '\n');
         if (nl) *nl = 0;
-        OcrWord wd;
-        char *tab = strchr(l, '\t');
-        if (tab && sscanf(l, "%d %d %d %d %d", &wd.line, &wd.x, &wd.y, &wd.w, &wd.h) == 5 && wd.w > 0 && wd.h > 0) {
-            char *t = tab + 1;
-            while (*t == ' ') t++;
-            int len = (int)strlen(t);
-            while (len > 0 && (t[len - 1] == ' ' || t[len - 1] == '\r')) t[--len] = 0;
-            if (len > 0) {
-                snprintf(wd.t, sizeof(wd.t), "%s", t);
-                words[nw++] = wd;
+        if (l[0] == '#') tile = atoi(l + 1);
+        else if (tile >= 0 && tile < ntiles) {
+            OcrWord wd;
+            char *tab = strchr(l, '\t');
+            if (tab && sscanf(l, "%d %d %d %d %d", &wd.line, &wd.x, &wd.y, &wd.w, &wd.h) == 5 && wd.w > 0 && wd.h > 0) {
+                char *t = tab + 1;
+                while (*t == ' ') t++;
+                int len = (int)strlen(t);
+                while (len > 0 && (t[len - 1] == ' ' || t[len - 1] == '\r')) t[--len] = 0;
+                float up = ups[tile];
+                wd.x = (int)(tx0[tile] + wd.x / up); wd.y = (int)(ty0[tile] + wd.y / up);
+                wd.w = (int)(wd.w / up + 0.5f); wd.h = (int)(wd.h / up + 0.5f);
+                wd.tile = tile;
+                float cx = wd.x + wd.w / 2.0f, cy = wd.y + wd.h / 2.0f;
+                int ti = tile % nx, tj = tile / nx;
+                float cx0 = ti > 0 ? tx0[tile] + OVER / 2.0f : -1e9f, cx1 = ti < nx - 1 ? tx1[tile] - OVER / 2.0f : 1e9f;
+                float cy0 = tj > 0 ? ty0[tile] + OVER / 2.0f : -1e9f, cy1 = tj < ny - 1 ? ty1[tile] - OVER / 2.0f : 1e9f;
+                if (len > 0 && cx >= cx0 && cx < cx1 && cy >= cy0 && cy < cy1) {
+                    snprintf(wd.t, sizeof(wd.t), "%s", t);
+                    words[nw++] = wd;
+                }
             }
         }
         if (!nl) break;
         l = nl + 1;
     }
+    // Renglones: las palabras de un mismo renglón del lector (y del mismo trozo)
     int n = 0;
     for (int i = 0; i < nw && n < max;) {
         int j = i;
-        while (j < nw && words[j].line == words[i].line) j++;
+        while (j < nw && words[j].line == words[i].line && words[j].tile == words[i].tile) j++;
         // Fuera las marcas sueltas al principio o al final del renglón (trocitos de un dibujo
         // o de un círculo que el lector confunde con una letra)
         int a0 = i, a1 = j;
         while (a0 < a1 && ocr_junk(words[a0].t)) a0++;
         while (a1 > a0 && ocr_junk(words[a1 - 1].t)) a1--;
+        // Palabras de un tamaño muy distinto al resto del renglón, en las puntas: son de otro
+        // texto que está al lado (por ejemplo, una frase pequeña junto a un título)
+        if (a1 - a0 >= 3) {
+            int hs[64], nh = 0;
+            for (int k = a0; k < a1 && nh < 64; k++) hs[nh++] = words[k].h;
+            for (int x = 1; x < nh; x++) { int v = hs[x], y = x - 1; while (y >= 0 && hs[y] > v) { hs[y + 1] = hs[y]; y--; } hs[y + 1] = v; }
+            float med = (float)hs[nh / 2];
+            while (a1 - a0 > 1 && (words[a1 - 1].h < med * 0.55f || words[a1 - 1].h > med * 1.8f)) a1--;
+            while (a1 - a0 > 1 && (words[a0].h < med * 0.55f || words[a0].h > med * 1.8f)) a0++;
+            // Y lo que está muy separado del resto (otro texto en la misma fila)
+            for (int k = a0 + 1; k < a1; k++)
+                if (words[k].x - (words[k - 1].x + words[k - 1].w) > med * 2.5f) {
+                    // Nos quedamos con el lado que tiene más letras
+                    int left = 0, right = 0;
+                    for (int q = a0; q < k; q++) left += (int)strlen(words[q].t);
+                    for (int q = k; q < a1; q++) right += (int)strlen(words[q].t);
+                    if (left >= right) a1 = k; else a0 = k;
+                    break;
+                }
+        }
         if (a1 > a0) {
             int bx0 = 1 << 30, by0 = 1 << 30, bx1 = -(1 << 30), by1 = -(1 << 30);
             lines[n].text[0] = 0;
@@ -1024,13 +1092,45 @@ static int run_ocr(Image src, int x0, int y0, int x1, int y1, OcrLine *lines, in
                 if (k > a0) strncat(lines[n].text, " ", sizeof(lines[n].text) - strlen(lines[n].text) - 1);
                 strncat(lines[n].text, words[k].t, sizeof(lines[n].text) - strlen(lines[n].text) - 1);
             }
-            lines[n].x = x0 + bx0 / up;
-            lines[n].y = y0 + by0 / up;
-            lines[n].w = (bx1 - bx0) / up;
-            lines[n].h = (by1 - by0) / up;
+            lines[n].x = (float)bx0; lines[n].y = (float)by0;
+            lines[n].w = (float)(bx1 - bx0); lines[n].h = (float)(by1 - by0);
             n++;
         }
         i = j;
+    }
+    // Renglones partidos entre dos trozos: si están a la misma altura y casi pegados, uno solo
+    for (bool merged = true; merged;) {
+        merged = false;
+        for (int i = 0; i < n && !merged; i++)
+            for (int j = 0; j < n && !merged; j++) {
+                if (i == j) continue;
+                OcrLine *A1 = &lines[i], *B1 = &lines[j];
+                if (B1->x < A1->x) continue;
+                float h = fmaxf(A1->h, B1->h);
+                float gap = B1->x - (A1->x + A1->w);
+                bool sameRow = fabsf((A1->y + A1->h / 2) - (B1->y + B1->h / 2)) < h * 0.3f && fminf(A1->h, B1->h) > h * 0.7f;
+                if (!sameRow || gap > h * 0.9f) continue;
+                if (gap < -h * 0.3f) {
+                    // Se pisan: es la misma palabra leída en los dos trozos; nos quedamos con la más larga
+                    if (strlen(B1->text) > strlen(A1->text)) *A1 = *B1;
+                } else {
+                    float nx1 = fmaxf(A1->x + A1->w, B1->x + B1->w);
+                    float ny0 = fminf(A1->y, B1->y), ny1 = fmaxf(A1->y + A1->h, B1->y + B1->h);
+                    strncat(A1->text, " ", sizeof(A1->text) - strlen(A1->text) - 1);
+                    strncat(A1->text, B1->text, sizeof(A1->text) - strlen(A1->text) - 1);
+                    A1->w = nx1 - A1->x; A1->y = ny0; A1->h = ny1 - ny0;
+                }
+                lines[j] = lines[n - 1];
+                n--;
+                merged = true;
+            }
+    }
+    // De arriba abajo
+    for (int i = 1; i < n; i++) {
+        OcrLine t = lines[i];
+        int k = i - 1;
+        while (k >= 0 && lines[k].y > t.y) { lines[k + 1] = lines[k]; k--; }
+        lines[k + 1] = t;
     }
     return n;
 }
@@ -1253,27 +1353,11 @@ static void line_box(const OcrLine *lines, int n, int i, int *x0, int *y0, int *
     *x1 = (int)(lines[i].x + lines[i].w + pad); *y1 = (int)bottom;
 }
 
-static void edit_text_box(int index)
+// Borra de la imagen los renglones leídos y pone en su sitio un texto igual que se puede
+// cambiar. src es la imagen del elemento (se libera aquí). Devuelve el texto nuevo o -1.
+static int convert_text_lines(int index, Image src, const OcrLine *lines, int n)
 {
     Element *e = &A.doc.el[index];
-    if (e->asset < 0 || e->asset >= g_assetCount) return;
-    Asset *as = &g_assets[e->asset];
-    Image src = LoadImageFromMemory(".png", as->png, as->pngSize);
-    if (!src.data) return;
-    int x0, y0, x1, y1;
-    box_to_pixels(e, src.width, src.height, &x0, &y0, &x1, &y1);
-    static OcrLine lines[64];
-    int n = run_ocr(src, x0, y0, x1, y1, lines, 64);
-    if (n == 0) {
-        UnloadImage(src);
-        // Sin lector: borramos y dejamos un texto vacío como antes
-        wand_box(index, true);
-        char msg[500];
-        if (g_ocrError[0]) snprintf(msg, sizeof(msg), "No he podido leer las letras (%s). Escribe tú el texto.", g_ocrError);
-        else snprintf(msg, sizeof(msg), "No he encontrado letras en el recuadro. Escribe tú el texto o rodéalo un poco más grande.");
-        toast(msg);
-        return;
-    }
     // Borrar cada renglón por separado (así no se tocan los dibujos de alrededor)
     Image work = ImageCopy(src);
     Color main = BLACK;
@@ -1440,14 +1524,14 @@ static void edit_text_box(int index)
     float sx = e->w / (float)work.width, sy = e->h / (float)work.height;
     int restId = asset_add_image(work);
     UnloadImage(work);
-    if (restId < 0) { toast("No caben más imágenes en este diseño"); return; }
+    if (restId < 0) { toast("No caben más imágenes en este diseño"); return -1; }
     begin_change();
     e = &A.doc.el[index];
     Element orig = *e;
     e->asset = restId;
     g_assets[restId].hidden = true;
     Element *t = doc_add(&A.doc, EL_TEXT);
-    if (!t) return;
+    if (!t) return -1;
     // Texto: renglones unidos; alineación según cómo empiezan y acaban los renglones
     t->text[0] = 0;
     float minL = 1e9f, maxR = -1e9f, maxW = 0;
@@ -1503,9 +1587,238 @@ static void edit_text_box(int index)
     t->x = c.x - t->w / 2;
     t->y = c.y - t->h / 2;
     int ni = doc_move_layer(&A.doc, A.doc.count - 1, index + 1 - (A.doc.count - 1));
+    return ni;
+}
+
+static void edit_text_box(int index)
+{
+    Element *e = &A.doc.el[index];
+    if (e->asset < 0 || e->asset >= g_assetCount) return;
+    Asset *as = &g_assets[e->asset];
+    Image src = LoadImageFromMemory(".png", as->png, as->pngSize);
+    if (!src.data) return;
+    int x0, y0, x1, y1;
+    box_to_pixels(e, src.width, src.height, &x0, &y0, &x1, &y1);
+    static OcrLine lines[64];
+    int n = run_ocr(src, x0, y0, x1, y1, lines, 64);
+    if (n == 0) {
+        UnloadImage(src);
+        // Sin lector: borramos y dejamos un texto vacío como antes
+        wand_box(index, true);
+        char msg[500];
+        if (g_ocrError[0]) snprintf(msg, sizeof(msg), "No he podido leer las letras (%s). Escribe tú el texto.", g_ocrError);
+        else snprintf(msg, sizeof(msg), "No he encontrado letras en el recuadro. Escribe tú el texto o rodéalo un poco más grande.");
+        toast(msg);
+        return;
+    }
+    int ni = convert_text_lines(index, src, lines, n);
+    if (ni < 0) return;
     A.fixText = false;
+    bool fromOcr = A.ocrMode && A.ocrElem == index;
+    if (fromOcr) A.ocrAsset = A.doc.el[index].asset;
     select_index(ni);
-    toast("Texto leído: haz doble clic para cambiarlo. Arriba puedes cambiar la letra, el tamaño y el color.");
+    if (fromOcr) {
+        A.editing = true;
+        A.editPushed = false;
+        A.caret = (int)strlen(A.doc.el[ni].text);
+        A.replaceOnType = true;
+    } else toast("Texto leído: haz doble clic para cambiarlo. Arriba puedes cambiar la letra, el tamaño y el color.");
+}
+
+// ---- Todos los textos de la imagen: se leen de una vez y se marcan para tocarlos ----
+
+#define OCR_MAX_LINES 400
+#define OCR_MAX_BLOCKS 200
+static OcrLine g_ocrLines[OCR_MAX_LINES];
+static int g_ocrN;
+typedef struct { float x, y, w, h; int idx[24]; int n; bool used; } OcrBlock;
+static OcrBlock g_ocrBlocks[OCR_MAX_BLOCKS];
+static int g_ocrNB;
+
+// Junta los renglones en párrafos: uno debajo de otro, de altura parecida y bien pegados
+static void ocr_build_blocks(void)
+{
+    g_ocrNB = 0;
+    for (int i = 0; i < g_ocrN; i++) {
+        const OcrLine *L = &g_ocrLines[i];
+        int best = -1;
+        for (int b = 0; b < g_ocrNB; b++) {
+            OcrBlock *B = &g_ocrBlocks[b];
+            if (B->n >= 24) continue;
+            const OcrLine *P = &g_ocrLines[B->idx[B->n - 1]];
+            float h = fmaxf(P->h, L->h);
+            float gap = L->y - (P->y + P->h);
+            if (gap < -h * 0.3f || gap > h * 0.65f) continue;
+            // Mismo tamaño de letra (un título y su explicación pequeña van aparte)
+            const OcrLine *F = &g_ocrLines[B->idx[0]];
+            if (fmaxf(P->h, L->h) > fminf(P->h, L->h) * 1.25f || fmaxf(F->h, L->h) > fminf(F->h, L->h) * 1.3f) continue;
+            // Que se toquen en horizontal (o tengan el centro casi igual)
+            float ov = fminf(P->x + P->w, L->x + L->w) - fmaxf(P->x, L->x);
+            float dc = fabsf((P->x + P->w / 2) - (L->x + L->w / 2));
+            if (ov < fminf(P->w, L->w) * 0.3f && dc > h) continue;
+            best = b;
+            break;
+        }
+        if (best < 0) {
+            if (g_ocrNB >= OCR_MAX_BLOCKS) continue;
+            best = g_ocrNB++;
+            g_ocrBlocks[best] = (OcrBlock){ L->x, L->y, L->w, L->h, { 0 }, 0, false };
+        }
+        OcrBlock *B = &g_ocrBlocks[best];
+        B->idx[B->n++] = i;
+        float x0 = fminf(B->x, L->x), y0 = fminf(B->y, L->y);
+        float x1 = fmaxf(B->x + B->w, L->x + L->w), y1 = fmaxf(B->y + B->h, L->y + L->h);
+        B->x = x0; B->y = y0; B->w = x1 - x0; B->h = y1 - y0;
+    }
+}
+
+static bool ocr_valid(void)
+{
+    if (!A.ocrMode) return false;
+    if (A.ocrElem < 0 || A.ocrElem >= A.doc.count) return false;
+    const Element *e = &A.doc.el[A.ocrElem];
+    return e->type == EL_IMAGE && e->asset == A.ocrAsset && e->visible;
+}
+
+static void ocr_scan(int index)
+{
+    A.ocrMode = false;
+    if (index < 0 || index >= A.doc.count) return;
+    Element *e = &A.doc.el[index];
+    if (e->type != EL_IMAGE || e->asset < 0 || e->asset >= g_assetCount) return;
+    Asset *as = &g_assets[e->asset];
+    Image src = LoadImageFromMemory(".png", as->png, as->pngSize);
+    if (!src.data) return;
+    g_ocrN = run_ocr(src, 0, 0, src.width, src.height, g_ocrLines, OCR_MAX_LINES);
+    UnloadImage(src);
+    if (g_ocrN == 0) {
+        char msg[500];
+        if (g_ocrError[0]) snprintf(msg, sizeof(msg), "No he podido leer las letras (%s).", g_ocrError);
+        else snprintf(msg, sizeof(msg), "No he encontrado textos en esta imagen.");
+        toast(msg);
+        return;
+    }
+    // Renglones de una sola letra suelta: casi siempre son trozos de dibujo
+    {
+        int k = 0;
+        for (int i = 0; i < g_ocrN; i++) {
+            int alnum = 0;
+            for (const char *c = g_ocrLines[i].text; *c;) {
+                int by = 0, cp = GetCodepoint(c, &by);
+                c += by > 0 ? by : 1;
+                if ((cp >= '0' && cp <= '9') || (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') || (cp >= 0xC0 && cp <= 0x24F)) alnum++;
+            }
+            if (alnum >= 2) g_ocrLines[k++] = g_ocrLines[i];
+        }
+        g_ocrN = k;
+    }
+    ocr_build_blocks();
+    // Fuera los "textos" que son trocitos de dibujo: muy pocas letras o casi todo signos
+    {
+        int k = 0;
+        for (int b = 0; b < g_ocrNB; b++) {
+            int alnum = 0, other = 0;
+            for (int q = 0; q < g_ocrBlocks[b].n; q++)
+                for (const char *c = g_ocrLines[g_ocrBlocks[b].idx[q]].text; *c;) {
+                    int by = 0, cp = GetCodepoint(c, &by);
+                    c += by > 0 ? by : 1;
+                    if (cp == ' ') continue;
+                    if ((cp >= '0' && cp <= '9') || (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') || (cp >= 0xC0 && cp <= 0x24F)) alnum++;
+                    else other++;
+                }
+            if (alnum >= 3 && alnum >= (alnum + other) * 0.6f && g_ocrBlocks[b].h >= 6) g_ocrBlocks[k++] = g_ocrBlocks[b];
+        }
+        g_ocrNB = k;
+    }
+    if (g_ocrNB == 0) { toast("No he encontrado textos en esta imagen."); return; }
+    A.ocrMode = true;
+    A.ocrElem = index;
+    A.ocrAsset = e->asset;
+    A.wand = false;
+    A.fixText = false;
+    char msg[200];
+    snprintf(msg, sizeof(msg), "He encontrado %d textos. Pulsa encima del que quieras cambiar y escribe. Esc para terminar.", g_ocrNB);
+    toast(msg);
+}
+
+// Esquinas de un recuadro de la imagen (en píxeles de la imagen) en el lienzo
+static void ocr_block_corners(const Element *e, const OcrBlock *b, Vector2 *c)
+{
+    const Asset *as = &g_assets[e->asset];
+    float sx = e->w / (float)as->w, sy = e->h / (float)as->h;
+    float pad = fminf(8, b->h * 0.15f);
+    float xs[2] = { (b->x - pad) * sx - e->w / 2, (b->x + b->w + pad) * sx - e->w / 2 };
+    float ys[2] = { (b->y - pad) * sy - e->h / 2, (b->y + b->h + pad) * sy - e->h / 2 };
+    c[0] = to_world(e, (Vector2){ xs[0], ys[0] });
+    c[1] = to_world(e, (Vector2){ xs[1], ys[0] });
+    c[2] = to_world(e, (Vector2){ xs[1], ys[1] });
+    c[3] = to_world(e, (Vector2){ xs[0], ys[1] });
+}
+
+static int ocr_block_at(Vector2 w)
+{
+    if (!ocr_valid()) return -1;
+    const Element *e = &A.doc.el[A.ocrElem];
+    const Asset *as = &g_assets[e->asset];
+    Vector2 l = to_local(e, w);
+    float px = (l.x + e->w / 2) / e->w * as->w, py = (l.y + e->h / 2) / e->h * as->h;
+    int best = -1;
+    float bestArea = 1e30f;
+    for (int i = 0; i < g_ocrNB; i++) {
+        const OcrBlock *b = &g_ocrBlocks[i];
+        if (b->used) continue;
+        float pad = fminf(8, b->h * 0.15f);
+        if (px >= b->x - pad && px <= b->x + b->w + pad && py >= b->y - pad && py <= b->y + b->h + pad && b->w * b->h < bestArea) {
+            best = i;
+            bestArea = b->w * b->h;
+        }
+    }
+    return best;
+}
+
+static void ocr_use_block(int bi)
+{
+    if (!ocr_valid() || bi < 0 || bi >= g_ocrNB) return;
+    OcrBlock *b = &g_ocrBlocks[bi];
+    Element *e = &A.doc.el[A.ocrElem];
+    Asset *as = &g_assets[e->asset];
+    Image src = LoadImageFromMemory(".png", as->png, as->pngSize);
+    if (!src.data) return;
+    OcrLine tmp[24];
+    for (int i = 0; i < b->n; i++) tmp[i] = g_ocrLines[b->idx[i]];
+    stop_editing();
+    int ni = convert_text_lines(A.ocrElem, src, tmp, b->n);
+    if (ni < 0) return;
+    b->used = true;
+    // La imagen sigue en el mismo sitio (el texto va justo encima), con el hueco ya borrado
+    A.ocrAsset = A.doc.el[A.ocrElem].asset;
+    select_index(ni);
+    Element *t = &A.doc.el[ni];
+    A.editing = true;
+    A.editPushed = false;
+    A.caret = (int)strlen(t->text);
+    A.replaceOnType = true;
+}
+
+static void ocr_draw(void)
+{
+    if (!ocr_valid()) { A.ocrMode = false; return; }
+    const Element *e = &A.doc.el[A.ocrElem];
+    Vector2 mw = GetScreenToWorld2D(GetMousePosition(), A.cam);
+    int hover = ui_mouse_free() && A.popup == POP_NONE ? ocr_block_at(mw) : -1;
+    for (int i = 0; i < g_ocrNB; i++) {
+        if (g_ocrBlocks[i].used) continue;
+        Vector2 c[4];
+        ocr_block_corners(e, &g_ocrBlocks[i], c);
+        for (int k = 0; k < 4; k++) c[k] = GetWorldToScreen2D(c[k], A.cam);
+        Color fill = i == hover ? (Color){ 109, 74, 255, 60 } : (Color){ 109, 74, 255, 18 };
+        DrawTriangle(c[0], c[2], c[1], fill);
+        DrawTriangle(c[0], c[3], c[2], fill);
+        DrawTriangle(c[0], c[1], c[2], fill);
+        DrawTriangle(c[0], c[2], c[3], fill);
+        Color line = i == hover ? COL_ACCENT : (Color){ 109, 74, 255, 150 };
+        for (int k = 0; k < 4; k++) DrawLineEx(c[k], c[(k + 1) % 4], i == hover ? 2.5f : 1.5f, line);
+    }
 }
 
 static void canvas_input(Rectangle cr)
@@ -1543,11 +1856,30 @@ static void canvas_input(Rectangle cr)
             Vector2 a = GetWorldToScreen2D(A.boxStart, A.cam), b = GetWorldToScreen2D(A.boxEnd, A.cam);
             bool click = fabsf(a.x - b.x) < 6 && fabsf(a.y - b.y) < 6;
             if (click && A.wand) wand_at(A.sel, A.boxStart);
-            else if (click) toast("Arrastra para rodear el texto que quieres corregir");
+            else if (click) { A.fixText = false; toast("Ahí no he encontrado texto. Si hay uno, arrastra para rodearlo."); }
             else if (A.fixText) edit_text_box(A.sel);
             else wand_box(A.sel, false);
         }
         return;
+    }
+    // Textos de la imagen ya leídos: pulsar encima de uno lo convierte en texto para escribir
+    if (ocr_valid() && over && A.drag == DRAG_NONE && !space) {
+        int b = ocr_block_at(w);
+        bool inEdit = A.editing && sel && hit_element(sel, w, 0);
+        if (b >= 0 && !inEdit) {
+            SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { ocr_use_block(b); return; }
+        } else if (!inEdit && hit_element(&A.doc.el[A.ocrElem], w, 0) && pick(w) == A.ocrElem) {
+            // Fuera de los textos encontrados: arrastrando se rodea uno que no haya visto
+            SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                select_index(A.ocrElem);
+                A.fixText = true;
+                A.boxDrag = true;
+                A.boxStart = A.boxEnd = w;
+                return;
+            }
+        }
     }
     if ((A.wand || A.fixText) && over && A.drag == DRAG_NONE) {
         bool onIt = hit_element(sel, w, 0);
@@ -1575,6 +1907,7 @@ static void canvas_input(Rectangle cr)
         // Si estamos escribiendo y se pulsa dentro del mismo texto: mover el cursor
         if (A.editing && hit == A.sel && sel) {
             A.caret = caret_from_point(sel, w);
+            A.replaceOnType = false;
             return;
         }
         double now = GetTime();
@@ -1681,6 +2014,26 @@ static void text_edit_input(void)
     if (A.caret > len) A.caret = len;
 
     int ch;
+    // Texto recién sacado de la imagen: lo primero que escribes lo sustituye entero
+    // (con las flechas o pulsando dentro del texto se corrige solo una parte)
+    if (A.replaceOnType) {
+        bool typed = false;
+        int pend[32], np = 0;
+        while ((ch = GetCharPressed()) != 0 && np < 32) pend[np++] = ch;
+        if (np > 0 || key_hit(KEY_BACKSPACE) || key_hit(KEY_DELETE)) {
+            text_edit_change();
+            e->text[0] = 0;
+            A.caret = 0;
+            typed = true;
+        }
+        for (int i = 0; i < np; i++) {
+            int bytes = 0;
+            const char *u = CodepointToUTF8(pend[i], &bytes);
+            insert_text(e, u, bytes);
+        }
+        if (typed) { A.replaceOnType = false; fix_text_height(e); return; }
+        if (key_hit(KEY_LEFT) || key_hit(KEY_RIGHT) || key_hit(KEY_HOME) || key_hit(KEY_END) || key_hit(KEY_UP) || key_hit(KEY_DOWN)) A.replaceOnType = false;
+    }
     while ((ch = GetCharPressed()) != 0) {
         int bytes = 0;
         const char *u = CodepointToUTF8(ch, &bytes);
@@ -1753,6 +2106,7 @@ static void shortcuts(void)
     if (c) return;
 
     Element *e = selected();
+    if (IsKeyPressed(KEY_ESCAPE) && A.ocrMode && !A.editing) { A.ocrMode = false; return; }
     if (IsKeyPressed(KEY_ESCAPE)) { A.popup = POP_NONE; if (A.wand || A.fixText) { A.wand = false; A.fixText = false; A.boxDrag = false; } else select_index(-1); }
     if (!e) return;
     if (IsKeyPressed(KEY_DELETE) || IsKeyPressed(KEY_BACKSPACE)) { if (!e->locked) cmd_delete(); return; }
@@ -1835,6 +2189,7 @@ static void draw_canvas(Rectangle cr)
         if (h >= 0 && h != A.sel) draw_element_outline(&A.doc.el[h], (Color){ 109, 74, 255, 140 }, 1.5f);
     }
 
+    if (A.ocrMode) ocr_draw();
     if (A.boxDrag) {
         Vector2 a = GetWorldToScreen2D(A.boxStart, A.cam), b = GetWorldToScreen2D(A.boxEnd, A.cam);
         Rectangle br = { fminf(a.x, b.x), fminf(a.y, b.y), fabsf(a.x - b.x), fabsf(a.y - b.y) };
@@ -1869,6 +2224,15 @@ static void draw_canvas(Rectangle cr)
                     DrawRectanglePro(in, (Vector2){ in.width / 2, in.height / 2 }, a, WHITE);
                 }
             }
+        }
+        if (A.editing && A.replaceOnType && e->type == EL_TEXT) {
+            // Todo el texto "seleccionado": lo que escribas lo sustituye
+            Vector2 c[4] = { to_world(e, (Vector2){ -e->w / 2, -e->h / 2 }), to_world(e, (Vector2){ e->w / 2, -e->h / 2 }),
+                             to_world(e, (Vector2){ e->w / 2, e->h / 2 }), to_world(e, (Vector2){ -e->w / 2, e->h / 2 }) };
+            for (int k = 0; k < 4; k++) c[k] = GetWorldToScreen2D(c[k], A.cam);
+            Color sc = { 109, 74, 255, 45 };
+            DrawTriangle(c[0], c[2], c[1], sc); DrawTriangle(c[0], c[3], c[2], sc);
+            DrawTriangle(c[0], c[1], c[2], sc); DrawTriangle(c[0], c[2], c[3], sc);
         }
         if (A.editing && e->type == EL_TEXT && fmod(GetTime(), 1.0) < 0.6) {
             float lh;
@@ -2962,10 +3326,16 @@ static void draw_toolbar(void)
         }
         x += 150;
         Rectangle fb2 = { x, y + 10, 210, 36 };
-        if (ui_button(fb2, A.fixText ? "Terminar" : "Editar texto de la imagen", A.fixText ? BTN_PRIMARY : BTN_NORMAL)) {
-            A.fixText = !A.fixText;
+        bool ocrOn = A.ocrMode && A.ocrElem == A.sel;
+        if (ui_button(fb2, ocrOn ? "Terminar" : "Editar textos de la imagen", ocrOn ? BTN_PRIMARY : BTN_NORMAL)) {
             A.wand = false;
-            if (A.fixText) toast("Rodea arrastrando el texto que quieres cambiar: se borra y podrás escribirlo de nuevo");
+            A.fixText = false;
+            if (ocrOn) A.ocrMode = false;
+            else if (A.ocrMode == false && A.ocrAsset == e->asset && A.ocrElem == A.sel && g_ocrNB > 0) A.ocrMode = true;
+            else {
+                toast("Leyendo los textos de la imagen... (tarda unos segundos)");
+                A.ocrPending = 2;
+            }
         }
         x += 224;
         if (A.wand || A.fixText) {
@@ -3196,6 +3566,22 @@ static void test_step(const char *dir, int frame)
     case 225: test_shot(dir, "17_lapiz"); break;
     case 226: {
         // Leer y rehacer el texto gris (3 renglones) y el título marrón
+        if (getenv("LIENZO_TEST_OCRALL")) {
+            select_index(0);
+            ocr_scan(0);
+            int big = -1;
+            for (int b = 0; b < g_ocrNB; b++) {
+                printf("BLOQUE %d (%.0f,%.0f %.0fx%.0f) %d renglones: ", b, g_ocrBlocks[b].x, g_ocrBlocks[b].y, g_ocrBlocks[b].w, g_ocrBlocks[b].h, g_ocrBlocks[b].n);
+                for (int k = 0; k < g_ocrBlocks[b].n; k++) printf("[%s] ", g_ocrLines[g_ocrBlocks[b].idx[k]].text);
+                printf("\n");
+                if (big < 0 || g_ocrBlocks[b].h / g_ocrBlocks[b].n > g_ocrBlocks[big].h / g_ocrBlocks[big].n) big = b;
+            }
+            const char *use = getenv("LIENZO_TEST_OCRUSE");
+            if (use) {
+                for (const char *q = use; *q;) { int bi = atoi(q); ocr_use_block(bi); printf("TEXTO esp=%.3f fuente=%s tam=%.0f \"%s\"\n", A.doc.el[A.sel].letterSpacing, font_name(A.doc.el[A.sel].font), A.doc.el[A.sel].fontSize, A.doc.el[A.sel].text); while (*q && *q != ',') q++; if (*q == ',') q++; }
+            } else if (big >= 0) ocr_use_block(big);
+            break;
+        }
         const char *clicks = getenv("LIENZO_TEST_CLICKS");
         if (clicks) {
             const char *q = clicks;
@@ -3337,6 +3723,8 @@ int main(int argc, char **argv)
         if (A.closingPopup && !IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) A.closingPopup = false;
 
         handle_drops();
+        // Leer los textos de la imagen cuando ya se ha dibujado el aviso de "Leyendo..."
+        if (A.ocrPending > 0 && --A.ocrPending == 0) ocr_scan(A.sel);
         shortcuts();
         canvas_input(cr);
 

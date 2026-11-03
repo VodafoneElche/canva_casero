@@ -186,10 +186,10 @@ int plat_list_dir(const char *dir, const char *ext, char (*names)[260], int max)
 
 // ---- Leer texto de imágenes con el OCR de Windows 10/11 (Windows.Media.Ocr) ----
 static const char OCR_PS1[] =
-"param([string]$img, [string]$out)\r\n"
+"param([string]$list, [string]$out)\r\n"
 "$ErrorActionPreference = 'Stop'\r\n"
 "try {\r\n"
-"$img = [System.IO.Path]::GetFullPath($img)\r\n"
+
 "Add-Type -AssemblyName System.Runtime.WindowsRuntime\r\n"
 "$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]\r\n"
 "$null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]\r\n"
@@ -199,25 +199,33 @@ static const char OCR_PS1[] =
 "$null = [Windows.Globalization.Language, Windows.Foundation, ContentType = WindowsRuntime]\r\n"
 "$asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]\r\n"
 "function Await($op, [Type]$t) { $task = $asTask.MakeGenericMethod($t).Invoke($null, @($op)); $null = $task.Wait(-1); $task.Result }\r\n"
-"$file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($img)) ([Windows.Storage.StorageFile])\r\n"
-"$stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])\r\n"
-"$dec = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])\r\n"
-"$bmp = Await ($dec.GetSoftwareBitmapAsync([Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8, [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied)) ([Windows.Graphics.Imaging.SoftwareBitmap])\r\n"
 "$engine = $null\r\n"
 "foreach ($code in @('es-ES', 'es')) { if ($engine -eq $null) { $lang = New-Object Windows.Globalization.Language $code; if ([Windows.Media.Ocr.OcrEngine]::IsLanguageSupported($lang)) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($lang) } } }\r\n"
 "if ($engine -eq $null) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }\r\n"
 "if ($engine -eq $null) { throw 'Windows no tiene instalado el lector de texto para tu idioma' }\r\n"
-"$res = Await ($engine.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])\r\n"
 "$sb = New-Object System.Text.StringBuilder\r\n"
-"$ln = 0\r\n"
-"foreach ($line in $res.Lines) {\r\n"
-"  foreach ($w in $line.Words) { $r = $w.BoundingRect; $null = $sb.Append(('{0} {1} {2} {3} {4}' -f $ln, [int]$r.X, [int]$r.Y, [int]$r.Width, [int]$r.Height) + \"`t\" + $w.Text + \"`n\") }\r\n"
-"  $ln++\r\n"
+"$k = 0\r\n"
+"foreach ($img in [System.IO.File]::ReadAllLines($list, [System.Text.Encoding]::UTF8)) {\r\n"
+"  if ($img.Trim() -eq '') { continue }\r\n"
+"  $null = $sb.Append('#' + $k + \"`n\")\r\n"
+"  $k++\r\n"
+"  $img = [System.IO.Path]::GetFullPath($img.Trim())\r\n"
+"  $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($img)) ([Windows.Storage.StorageFile])\r\n"
+"  $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])\r\n"
+"  $dec = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])\r\n"
+"  $bmp = Await ($dec.GetSoftwareBitmapAsync([Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8, [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied)) ([Windows.Graphics.Imaging.SoftwareBitmap])\r\n"
+"  $res = Await ($engine.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])\r\n"
+"  $ln = 0\r\n"
+"  foreach ($line in $res.Lines) {\r\n"
+"    foreach ($w in $line.Words) { $r = $w.BoundingRect; $null = $sb.Append(('{0} {1} {2} {3} {4}' -f $ln, [int]$r.X, [int]$r.Y, [int]$r.Width, [int]$r.Height) + \"`t\" + $w.Text + \"`n\") }\r\n"
+"    $ln++\r\n"
+"  }\r\n"
+"  $stream.Dispose()\r\n"
 "}\r\n"
 "[System.IO.File]::WriteAllText($out, $sb.ToString(), (New-Object System.Text.UTF8Encoding $false))\r\n"
 "} catch { $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }; [System.IO.File]::WriteAllText($out, 'ERROR ' + $e.Message) }\r\n";
 
-bool plat_ocr(const char *pngPath, char *out, int max)
+bool plat_ocr(const char *const *paths, int count, char *out, int max)
 {
     out[0] = 0;
     wchar_t tmp[MAX_PATH];
@@ -230,17 +238,22 @@ bool plat_ocr(const char *pngPath, char *out, int max)
     fwrite(OCR_PS1, 1, sizeof(OCR_PS1) - 1, f);
     fclose(f);
     DeleteFileW(res);
-    wchar_t *img = to_wide(pngPath);
+    // Lista de imágenes (una por línea, en UTF-8)
+    wchar_t lst[MAX_PATH + 40];
+    swprintf(lst, MAX_PATH + 40, L"%lslienzo_ocr_lista.txt", tmp);
+    FILE *lf = _wfopen(lst, L"wb");
+    if (!lf) return false;
+    for (int i = 0; i < count; i++) fprintf(lf, "%s\r\n", paths[i]);
+    fclose(lf);
     wchar_t cmd[4096];
-    swprintf(cmd, 4096, L"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%ls\" \"%ls\" \"%ls\"", ps1, img, res);
-    free(img);
+    swprintf(cmd, 4096, L"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%ls\" \"%ls\" \"%ls\"", ps1, lst, res);
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = { 0 };
     if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
         snprintf(out, max, "ERROR no se puede abrir PowerShell");
         return false;
     }
-    if (WaitForSingleObject(pi.hProcess, 45000) == WAIT_TIMEOUT) {
+    if (WaitForSingleObject(pi.hProcess, 30000 + 8000 * count) == WAIT_TIMEOUT) {
         TerminateProcess(pi.hProcess, 1);
         snprintf(out, max, "ERROR el lector ha tardado demasiado");
     }
@@ -386,16 +399,19 @@ int plat_list_dir(const char *dir, const char *ext, char (*names)[260], int max)
 
 
 // En Linux (para pruebas) usamos tesseract si está instalado
-bool plat_ocr(const char *pngPath, char *out, int max)
+bool plat_ocr(const char *const *paths, int count, char *out, int max)
 {
     out[0] = 0;
+    int len = 0;
+    bool any = false;
+    for (int img = 0; img < count && len < max - 1; img++) {
+    len += snprintf(out + len, max - len, "#%d\n", img);
     char cmd[2400];
-    snprintf(cmd, sizeof(cmd), "tesseract '%s' stdout -l spa --psm 6 tsv 2>/dev/null", pngPath);
+    snprintf(cmd, sizeof(cmd), "tesseract '%s' stdout -l spa --psm 11 tsv 2>/dev/null", paths[img]);
     FILE *p = popen(cmd, "r");
     if (!p) return false;
     char line[2048];
-    int curKey = -1, lineNo = -1, len = 0;
-    bool any = false;
+    int curKey = -1, lineNo = -1;
     while (fgets(line, sizeof(line), p)) {
         int level, page, block, par, ln, word, l, t, w, h;
         float conf;
@@ -409,6 +425,7 @@ bool plat_ocr(const char *pngPath, char *out, int max)
         if (len >= max - 1) break;
     }
     pclose(p);
+    }
     return any;
 }
 
