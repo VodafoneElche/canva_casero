@@ -1,0 +1,68 @@
+name: Compilar
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Instalador de Windows
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar MinGW y NSIS
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64 nsis
+
+      - name: Versión
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.9.1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compilar LienzoCasero.exe
+        run: |
+          cmake -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-win -j
+
+      - name: Crear el instalador
+        run: |
+          makensis -DEXE="$PWD/build-win/LienzoCasero.exe" \
+                   -DVERSION="${{ steps.ver.outputs.version }}" \
+                   -DOUTFILE="$PWD/LienzoCasero-${{ steps.ver.outputs.version }}-instalador.exe" \
+                   installer/lienzo-casero.nsi
+
+      - name: Guardar el instalador
+        uses: actions/upload-artifact@v4
+        with:
+          name: LienzoCasero-instalador-windows
+          path: |
+            LienzoCasero-*-instalador.exe
+            build-win/LienzoCasero.exe
+
+      - name: Publicar versión (solo con etiqueta v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: LienzoCasero-*-instalador.exe
+
+  linux:
+    name: Comprobar que compila en Linux
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencias
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev
+      - name: Compilar
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
