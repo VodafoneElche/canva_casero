@@ -20,6 +20,9 @@ sin internet en **Windows 10 y 11 (64 bits)**.
   corazón, línea y flecha. Con relleno, borde y transparencia.
 - **Dibujos**: 140 dibujos de colores en 10 temas (fiestas, amor, animales, comida, Navidad...).
   También se pueden abrir archivos **SVG** propios, por ejemplo los de vector4free.com.
+  Al abrir un SVG puedes elegir: **entero**, **por partes** (cada bloque del dibujo es una
+  capa que se mueve y se borra por separado) o **por partes y colores** (además, cada color
+  es una capa a la que se le puede cambiar el color). Se respetan los recortes de Illustrator.
 - **Imágenes**: desde el ordenador, arrastrándolas a la ventana o pegándolas con Ctrl+V.
   Se guardan dentro del diseño, así que un `.lienzo` se puede pasar a otro ordenador.
 - **Mover, cambiar de tamaño y girar** con el ratón. Imán para centrar en el lienzo.
@@ -33,7 +36,7 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 1. Entra en la pestaña **Actions** del repositorio, abre la última ejecución correcta de
    "Compilar" y descarga `LienzoCasero-instalador-windows`.
    (Cuando se publique una versión, también estará en **Releases**.)
-2. Descomprime el zip y ejecuta `LienzoCasero-0.3.0-instalador.exe`.
+2. Descomprime el zip y ejecuta `LienzoCasero-0.4.0-instalador.exe`.
 3. Windows puede avisar con "Windows protegió su PC" porque el programa no está firmado:
    pulsa **Más información** y luego **Ejecutar de todas formas**.
 
@@ -100,6 +103,7 @@ cmake -B build && cmake --build build && ./build/LienzoCasero
 ## Próximos pasos
 
 - Importar diseños descargados de Canva en PDF, con los textos como capas editables.
+- Lápiz mágico: separar del fondo la parte de una imagen que toques.
 - Agrupar y seleccionar varios elementos a la vez.
 - Recortar imágenes y filtros sencillos.
 

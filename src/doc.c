@@ -31,6 +31,25 @@ int asset_add_png(const unsigned char *data, int size)
     a->h = img.height;
     a->tex = LoadTextureFromImage(img);
     GenTextureMipmaps(&a->tex);
+    {
+        Image m = ImageCopy(img);
+        ImageFormat(&m, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+        float k = fminf(1.0f, 256.0f / (float)(m.width > m.height ? m.width : m.height));
+        a->mw = m.width * k < 1 ? 1 : (int)(m.width * k);
+        a->mh = m.height * k < 1 ? 1 : (int)(m.height * k);
+        a->mask = (unsigned char *)calloc((size_t)a->mw * a->mh, 1);
+        const unsigned char *px = (const unsigned char *)m.data;
+        // Guardamos el máximo de cada celda para no perder líneas finas
+        for (int y = 0; y < m.height; y++)
+            for (int x = 0; x < m.width; x++) {
+                int mx = (int)(x * k), my = (int)(y * k);
+                if (mx >= a->mw) mx = a->mw - 1;
+                if (my >= a->mh) my = a->mh - 1;
+                unsigned char al = px[((size_t)y * m.width + x) * 4 + 3];
+                if (al > a->mask[my * a->mw + mx]) a->mask[my * a->mw + mx] = al;
+            }
+        UnloadImage(m);
+    }
     SetTextureFilter(a->tex, TEXTURE_FILTER_TRILINEAR);
     UnloadImage(img);
     return g_assetCount++;
@@ -66,13 +85,27 @@ int asset_load_file(const char *path)
     for (int i = 0; ext && ext[i] && i < 15; i++) lower[i] = (char)(ext[i] >= 'A' && ext[i] <= 'Z' ? ext[i] + 32 : ext[i]);
     if (strcmp(lower, ".jpeg") == 0) strcpy(lower, ".jpg");
     Image img;
-    if (strcmp(lower, ".svg") == 0) img = svg_to_image(data, size, 1400);   // dibujos vectoriales
+    if (strcmp(lower, ".svg") == 0) img = svg_to_image_clipped(data, size, 1400);   // dibujos vectoriales
     else img = LoadImageFromMemory(lower[0] ? lower : ".png", data, size);
     free(data);
     if (img.data == NULL) return -1;
     int id = asset_add_image(img);
     UnloadImage(img);
     return id;
+}
+
+bool asset_opaque_at(int id, float u, float v)
+{
+    if (id < 0 || id >= g_assetCount || !g_assets[id].mask) return true;
+    const Asset *a = &g_assets[id];
+    int cx = (int)(u * a->mw), cy = (int)(v * a->mh);
+    // Un poco de margen alrededor del punto
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            int x = cx + dx, y = cy + dy;
+            if (x >= 0 && y >= 0 && x < a->mw && y < a->mh && a->mask[y * a->mw + x] > 24) return true;
+        }
+    return false;
 }
 
 Texture2D asset_texture(int id)
@@ -447,6 +480,13 @@ bool doc_save(const Document *d, const char *path)
             str_printf(&s, "texto ");
             escape_text(&s, e->text);
             str_add(&s, "\n", 1);
+        } else if (e->type == EL_IMAGE) {
+            if (e->tint) str_printf(&s, "tinte 1\n");
+            if (e->text[0]) {
+                str_printf(&s, "texto ");
+                escape_text(&s, e->text);
+                str_add(&s, "\n", 1);
+            }
         }
     }
     for (int i = 0; i < usedCount; i++) {
@@ -524,6 +564,8 @@ bool doc_load(Document *d, const char *path)
                 le->effectColor = (Color){ (unsigned char)r, (unsigned char)g, (unsigned char)b, (unsigned char)a };
                 le->effectAmount = amt;
             }
+        } else if (strncmp(line, "tinte ", 6) == 0 && tmp->count > 0) {
+            tmp->el[tmp->count - 1].tint = atoi(line + 6) != 0;
         } else if (strncmp(line, "texto ", 6) == 0 && tmp->count > 0) {
             unescape_text(tmp->el[tmp->count - 1].text, line + 6, TEXT_MAX);
         } else if (strncmp(line, "imagen ", 7) == 0) {

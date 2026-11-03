@@ -27,7 +27,7 @@ extern void glfwSetWindowShouldClose(void *window, int value);
 
 typedef enum { PANEL_DESIGN, PANEL_TEMPLATES, PANEL_ELEMENTS, PANEL_CLIPART, PANEL_TEXT, PANEL_IMAGES, PANEL_LAYERS, PANEL_COUNT } PanelId;
 typedef enum { POP_NONE, POP_FILE, POP_EXPORT, POP_COLOR, POP_FONT, POP_EFFECT } PopupId;
-typedef enum { MODAL_NONE, MODAL_NEW, MODAL_SAVE_TEMPLATE } ModalId;
+typedef enum { MODAL_NONE, MODAL_NEW, MODAL_SAVE_TEMPLATE, MODAL_SVG } ModalId;
 typedef enum { DRAG_NONE, DRAG_MOVE, DRAG_RESIZE, DRAG_ROTATE, DRAG_PAN } DragMode;
 typedef enum { COLOR_FILL, COLOR_STROKE, COLOR_BG, COLOR_EFFECT } ColorTarget;
 
@@ -100,6 +100,8 @@ static struct {
     float snapXv, snapYv;
 
     char templateName[128];
+    char svgPath[2048];     // SVG esperando a que elijas "entero" o "por partes"
+    Vector2 svgAt;
     char customW[16], customH[16];
 
     double lastClickTime;
@@ -369,10 +371,55 @@ static void add_image_asset(int asset, Vector2 center)
     select_index(A.doc.count - 1);
 }
 
+// Mete cada parte del SVG como una imagen suelta, en su sitio
+static int import_svg_parts(const char *path, int mode, Vector2 center)
+{
+    int size = 0;
+    unsigned char *data = plat_read_file(path, &size);
+    if (!data) return 0;
+    static SvgPart parts[SVG_MAX_PARTS];
+    float sw, sh;
+    int how;
+    int n = svg_split(data, size, 1800, mode, parts, SVG_MAX_PARTS, &sw, &sh, &how);
+    free(data);
+    if (n < 1) return 0;
+    float k = fminf(A.doc.w * 0.8f / sw, A.doc.h * 0.8f / sh);
+    float ox = center.x - sw * k / 2, oy = center.y - sh * k / 2;
+    begin_change();
+    int added = 0;
+    for (int i = 0; i < n; i++) {
+        int id = asset_add_image(parts[i].img);
+        if (id < 0) continue;
+        Element *e = doc_add(&A.doc, EL_IMAGE);
+        if (!e) break;
+        e->asset = id;
+        e->x = ox + parts[i].x * k;
+        e->y = oy + parts[i].y * k;
+        e->w = parts[i].w * k;
+        e->h = parts[i].h * k;
+        e->tint = parts[i].single;
+        e->fill = parts[i].single ? parts[i].color : WHITE;
+        e->stroke = WHITE;
+        snprintf(e->text, TEXT_MAX, "%s", parts[i].name);
+        added++;
+    }
+    svg_free_parts(parts, n);
+    if (added) select_index(A.doc.count - 1);
+    return added;
+}
+
+static void ask_svg(const char *path, Vector2 at)
+{
+    snprintf(A.svgPath, sizeof(A.svgPath), "%s", path);
+    A.svgAt = at;
+    A.modal = MODAL_SVG;
+}
+
 static void cmd_upload_image(void)
 {
     const char *p = plat_open_dialog("Elegir una imagen", FILE_KIND_IMAGE);
     if (!p) return;
+    if (IsFileExtension(p, ".svg;.SVG")) { ask_svg(p, doc_center()); return; }
     int id = asset_load_file(p);
     if (id < 0) { plat_message(APP_NAME, "No se ha podido leer esa imagen. Prueba con una foto PNG o JPG."); return; }
     add_image_asset(id, doc_center());
@@ -469,8 +516,19 @@ static bool hit_element(const Element *e, Vector2 w, float pad)
     return fabsf(l.x) <= e->w / 2 + pad && fabsf(l.y) <= hh + pad;
 }
 
+// En las imágenes con transparencia (partes de un SVG, dibujos) solo cuenta lo que tiene color
+static bool hit_opaque(const Element *e, Vector2 w)
+{
+    if (e->type != EL_IMAGE) return true;
+    Vector2 l = to_local(e, w);
+    float u = (l.x + e->w / 2) / e->w, v = (l.y + e->h / 2) / e->h;
+    return asset_opaque_at(e->asset, u, v);
+}
+
 static int pick(Vector2 w)
 {
+    for (int i = A.doc.count - 1; i >= 0; i--)
+        if (A.doc.el[i].visible && hit_element(&A.doc.el[i], w, 2 / A.cam.zoom) && hit_opaque(&A.doc.el[i], w)) return i;
     for (int i = A.doc.count - 1; i >= 0; i--)
         if (A.doc.el[i].visible && hit_element(&A.doc.el[i], w, 2 / A.cam.zoom)) return i;
     return -1;
@@ -1268,6 +1326,41 @@ static void draw_modal(void)
             }
             A.modal = MODAL_NONE;
         }
+    } else if (A.modal == MODAL_SVG) {
+        Rectangle r = { sw / 2.0f - 280, sh / 2.0f - 190, 560, 380 };
+        popup_card(r);
+        ui_text_bold("¿Cómo quieres abrir el dibujo?", r.x + 28, r.y + 24, 22, COL_TEXT);
+        const char *base = GetFileName(A.svgPath);
+        ui_text_fit(base, r.x + 28, r.y + 56, r.width - 56, 16, COL_MUTED);
+        struct { const char *t, *d; } opt[3] = {
+            { "Entero", "Una sola imagen, como está." },
+            { "Por partes", "Cada bloque del dibujo se puede mover y borrar." },
+            { "Por partes y colores", "Además, cada color por separado para poder cambiarlo." },
+        };
+        for (int i = 0; i < 3; i++) {
+            Rectangle b = { r.x + 28, r.y + 92 + i * 76, r.width - 56, 66 };
+            bool hover = ui_hover(b);
+            DrawRectangleRounded(b, 0.2f, 6, hover ? COL_ACCENT_LT : COL_HOVER);
+            ui_text_bold(opt[i].t, b.x + 16, b.y + 10, 18, COL_TEXT);
+            ui_text(opt[i].d, b.x + 16, b.y + 37, 15, COL_MUTED);
+            if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+                A.modal = MODAL_NONE;
+                if (i == 0) {
+                    int id = asset_load_file(A.svgPath);
+                    if (id >= 0) add_image_asset(id, A.svgAt);
+                    else plat_message(APP_NAME, "No se ha podido leer ese dibujo SVG.");
+                } else {
+                    int n = import_svg_parts(A.svgPath, i - 1, A.svgAt);
+                    if (n <= 0) plat_message(APP_NAME, "No se ha podido leer ese dibujo SVG.");
+                    else {
+                        char m[120];
+                        snprintf(m, sizeof(m), "Dibujo separado en %d partes. Míralas en \"Capas\".", n);
+                        toast(m);
+                    }
+                }
+            }
+        }
+        if (ui_button((Rectangle){ r.x + r.width - 140, r.y + r.height - 56, 112, 40 }, "Cancelar", BTN_NORMAL)) A.modal = MODAL_NONE;
     }
     ui_set_layer(0);
 }
@@ -1750,6 +1843,8 @@ static void element_label(const Element *e, char *out, int max)
         for (const char *p = e->text; *p && *p != '\n' && n < 40; p++) first[n++] = *p;
         first[n] = 0;
         snprintf(out, max, "\"%s\"", n ? first : "(vacío)");
+    } else if (e->type == EL_IMAGE && e->text[0]) {
+        snprintf(out, max, "%s", e->text);
     } else {
         snprintf(out, max, "%s", element_type_name(e->type));
     }
@@ -1795,7 +1890,7 @@ static float panel_layers(float x, float y, float w)
         icon_eye((Vector2){ eye.x + 15, eye.y + 15 }, e->visible, ui_hover(eye) ? COL_ACCENT : ic);
         icon_lock((Vector2){ lock.x + 15, lock.y + 15 }, e->locked, ui_hover(lock) ? COL_ACCENT : (e->locked ? COL_TEXT : (Color){ 180, 183, 198, 255 }));
         // Muestra de color
-        Color sc = e->type == EL_IMAGE ? (Color){ 200, 200, 210, 255 } : e->fill;
+        Color sc = (e->type == EL_IMAGE && !e->tint) ? (Color){ 200, 200, 210, 255 } : e->fill;
         if (sc.a == 0) sc = e->stroke;
         DrawRectangleRounded((Rectangle){ row.x + 74, row.y + 13, 18, 18 }, 0.3f, 4, sc);
         char label[128];
@@ -1911,6 +2006,12 @@ static void draw_toolbar(void)
     bool shape = e->type == EL_RECT || e->type == EL_ELLIPSE || e->type == EL_TRIANGLE || e->type == EL_STAR || e->type == EL_HEART;
     if (e->type != EL_IMAGE) {
         tb_label(e->type == EL_TEXT ? "Color" : e->type == EL_LINE || e->type == EL_ARROW ? "Color" : "Relleno", x, y);
+        Rectangle sw = { x, y + 20, 30, 28 };
+        if (ui_swatch(sw, e->fill, A.popup == POP_COLOR && A.colorTarget == COLOR_FILL)) open_color(COLOR_FILL, sw);
+        x += 56;
+    }
+    if (e->type == EL_IMAGE && e->tint) {
+        tb_label("Color", x, y);
         Rectangle sw = { x, y + 20, 30, 28 };
         if (ui_swatch(sw, e->fill, A.popup == POP_COLOR && A.colorTarget == COLOR_FILL)) open_color(COLOR_FILL, sw);
         x += 56;
@@ -2045,6 +2146,7 @@ static void handle_drops(void)
             if (fi >= 0) { char m[200]; snprintf(m, sizeof(m), "Fuente añadida: %s", font_name(fi)); toast(m); }
             continue;
         }
+        if (IsFileExtension(p, ".svg;.SVG") && A.modal == MODAL_NONE) { ask_svg(p, at); continue; }
         int id = asset_load_file(p);
         if (id >= 0) {
             add_image_asset(id, at);
@@ -2149,7 +2251,29 @@ static void test_step(const char *dir, int frame)
         break;
     }
     case 200: test_shot(dir, "12_dibujos"); break;
-    case 201: A.quit = true; break;
+    case 202: {
+        const char *svg = getenv("LIENZO_TEST_SVG2");
+        if (!svg) { A.quit = true; break; }
+        new_document(1754, 1240);
+        ask_svg(svg, doc_center());
+        break;
+    }
+    case 205: test_shot(dir, "13_svg_pregunta"); A.modal = MODAL_NONE; break;
+    case 206: { int id = asset_load_file(getenv("LIENZO_TEST_SVG2")); add_image_asset(id, doc_center()); break; }
+    case 210: test_shot(dir, "14_svg_entero"); break;
+    case 211: new_document(1754, 1240); import_svg_parts(getenv("LIENZO_TEST_SVG2"), 1, doc_center()); A.panel = PANEL_LAYERS; A.panelOpen = true; A.panelScroll = 0; break;
+    case 212: {
+        // Mover una parte y cambiar el color de otra
+        for (int i = 0; i < A.doc.count; i++) if (A.doc.el[i].tint) { A.doc.el[i].fill = (Color){ 40, 170, 90, 255 }; break; }
+        A.doc.el[A.doc.count - 1].x += 200;
+        A.doc.el[A.doc.count - 1].y += 80;
+        select_index(A.doc.count - 1);
+        break;
+    }
+    case 216: test_shot(dir, "15_svg_partes"); { char p[1200]; snprintf(p, sizeof(p), "%s/partes.lienzo", dir); save_to(p); } break;
+    case 217: { char p[1200]; snprintf(p, sizeof(p), "%s/partes.lienzo", dir); open_path(p); select_index(-1); break; }
+    case 220: test_shot(dir, "16_svg_reabierto"); break;
+    case 221: A.quit = true; break;
     }
 }
 

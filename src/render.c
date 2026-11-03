@@ -575,7 +575,7 @@ void render_element(const Element *e)
         if (tex.id != 0) {
             Rectangle src = { 0, 0, (float)tex.width, (float)tex.height };
             Rectangle dst = { -hw, -hh, e->w, e->h };
-            DrawTexturePro(tex, src, dst, (Vector2){ 0, 0 }, 0, with_opacity(WHITE, e->opacity));
+            DrawTexturePro(tex, src, dst, (Vector2){ 0, 0 }, 0, with_opacity(e->tint ? e->fill : WHITE, e->opacity));
             if (e->strokeW > 0) DrawRectangleLinesEx(dst, e->strokeW, stroke);
         } else {
             DrawRectangle((int)-hw, (int)-hh, (int)e->w, (int)e->h, LIGHTGRAY);

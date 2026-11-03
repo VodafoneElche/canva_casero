@@ -44,6 +44,7 @@ typedef struct {
     Color effectColor;
     float effectAmount;    // 0..1
     int asset;             // índice de imagen (imágenes)
+    bool tint;             // imagen de un solo color: se pinta con 'fill' (partes de SVG)
     bool visible;
     bool locked;
     char text[TEXT_MAX];
@@ -62,6 +63,8 @@ typedef struct {
     int pngSize;
     Texture2D tex;
     int w, h;
+    unsigned char *mask;   // transparencia reducida (para saber si se ha hecho clic encima)
+    int mw, mh;
 } Asset;
 
 extern Asset g_assets[MAX_ASSETS];
@@ -71,6 +74,7 @@ int asset_add_image(Image img);                       // devuelve índice o -1
 int asset_add_png(const unsigned char *data, int size);
 int asset_load_file(const char *path);                 // png/jpg/... desde disco
 Texture2D asset_texture(int id);
+bool asset_opaque_at(int id, float u, float v);   // u, v de 0 a 1
 
 // ---- Documento ----
 void doc_init(Document *d, int w, int h, Color bg);
