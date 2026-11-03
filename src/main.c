@@ -6,6 +6,7 @@
 #include "doc.h"
 #include "platform.h"
 #include "render.h"
+#include "magic.h"
 #include "svg.h"
 #include "templates.h"
 #include "ui.h"
@@ -100,6 +101,8 @@ static struct {
     float snapXv, snapYv;
 
     char templateName[128];
+    bool wand;              // lápiz mágico activo
+    float wandTol;
     char svgPath[2048];     // SVG esperando a que elijas "entero" o "por partes"
     Vector2 svgAt;
     char customW[16], customH[16];
@@ -192,7 +195,7 @@ static void stop_editing(void)
 
 static void select_index(int i)
 {
-    if (i != A.sel) stop_editing();
+    if (i != A.sel) { stop_editing(); A.wand = false; }
     A.sel = i;
 }
 
@@ -663,6 +666,49 @@ static void apply_rotate(Element *e, Vector2 mouseWorld)
     e->rotation = a;
 }
 
+// Lápiz mágico: separa la parte tocada de la imagen seleccionada en una capa nueva
+static void wand_at(int index, Vector2 w)
+{
+    Element *e = &A.doc.el[index];
+    if (e->asset < 0 || e->asset >= g_assetCount) return;
+    Asset *as = &g_assets[e->asset];
+    Image src = LoadImageFromMemory(".png", as->png, as->pngSize);
+    if (!src.data) return;
+    Vector2 l = to_local(e, w);
+    int px = (int)((l.x + e->w / 2) / e->w * src.width), py = (int)((l.y + e->h / 2) / e->h * src.height);
+    Image part, rest;
+    int bx, by;
+    int ok = magic_extract(src, px, py, A.wandTol, &part, &bx, &by, &rest);
+    UnloadImage(src);
+    if (!ok) { toast("Ahí solo hay fondo. Toca encima de un dibujo o de un texto."); return; }
+    int partId = asset_add_image(part), restId = asset_add_image(rest);
+    float sx = e->w / (float)rest.width, sy = e->h / (float)rest.height;
+    UnloadImage(part);
+    UnloadImage(rest);
+    if (partId < 0 || restId < 0) { toast("No caben más imágenes en este diseño"); return; }
+    begin_change();
+    e = &A.doc.el[index];
+    Element orig = *e;
+    Element *n = doc_add(&A.doc, EL_IMAGE);
+    if (!n) { toast("No caben más elementos en este diseño"); return; }
+    e = &A.doc.el[index];
+    e->asset = restId;
+    *n = orig;
+    n->asset = partId;
+    n->w = g_assets[partId].w * sx;
+    n->h = g_assets[partId].h * sy;
+    Vector2 lc = { (bx + g_assets[partId].w / 2.0f) * sx - orig.w / 2, (by + g_assets[partId].h / 2.0f) * sy - orig.h / 2 };
+    Vector2 c = to_world(&orig, lc);
+    n->x = c.x - n->w / 2;
+    n->y = c.y - n->h / 2;
+    n->locked = false;
+    snprintf(n->text, TEXT_MAX, "Recorte");
+    // Justo encima de la imagen de la que sale
+    doc_move_layer(&A.doc, A.doc.count - 1, index + 1 - (A.doc.count - 1));
+    A.sel = index;
+    toast("Parte separada: ya la puedes mover. Toca otra o pulsa Esc para terminar.");
+}
+
 static void canvas_input(Rectangle cr)
 {
     Vector2 m = GetMousePosition();
@@ -690,6 +736,15 @@ static void canvas_input(Rectangle cr)
     }
 
     Element *sel = selected();
+    if (A.wand && (!sel || sel->type != EL_IMAGE)) A.wand = false;
+    if (A.wand && over && A.drag == DRAG_NONE) {
+        bool onIt = hit_element(sel, w, 0);
+        if (onIt) SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !space) {
+            if (onIt) { wand_at(A.sel, w); return; }
+            A.wand = false;
+        }
+    }
     if (over && A.drag == DRAG_NONE && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !space) {
         if (sel && !sel->locked) {
             int h = handle_at(sel, m);
@@ -885,7 +940,7 @@ static void shortcuts(void)
     if (c) return;
 
     Element *e = selected();
-    if (IsKeyPressed(KEY_ESCAPE)) { A.popup = POP_NONE; select_index(-1); }
+    if (IsKeyPressed(KEY_ESCAPE)) { A.popup = POP_NONE; if (A.wand) A.wand = false; else select_index(-1); }
     if (!e) return;
     if (IsKeyPressed(KEY_DELETE) || IsKeyPressed(KEY_BACKSPACE)) { if (!e->locked) cmd_delete(); return; }
     if ((IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_F2)) && e->type == EL_TEXT && !e->locked) {
@@ -2069,6 +2124,20 @@ static void draw_toolbar(void)
     }
     x = tb_divider(x, y);
     x = tb_slider(4, "Transparencia", x, y, 110, &e->opacity, 0.05f, 1);
+    if (e->type == EL_IMAGE && !e->locked) {
+        x = tb_divider(x, y);
+        Rectangle wb = { x, y + 10, 140, 36 };
+        if (ui_button(wb, A.wand ? "Terminar" : "Lápiz mágico", A.wand ? BTN_PRIMARY : BTN_NORMAL)) {
+            A.wand = !A.wand;
+            if (A.wand) toast("Toca un dibujo o un texto de la imagen para separarlo del fondo");
+        }
+        x += 154;
+        if (A.wand) {
+            tb_label("Parecido al fondo", x, y);
+            ui_slider(5, (Rectangle){ x + 4, y + 30, 120 - 8, 12 }, &A.wandTol, 0, 1);
+            x += 134;
+        }
+    }
 
     // Botones de la derecha
     float bx = tb.x + tb.width - 16;
@@ -2273,7 +2342,31 @@ static void test_step(const char *dir, int frame)
     case 216: test_shot(dir, "15_svg_partes"); { char p[1200]; snprintf(p, sizeof(p), "%s/partes.lienzo", dir); save_to(p); } break;
     case 217: { char p[1200]; snprintf(p, sizeof(p), "%s/partes.lienzo", dir); open_path(p); select_index(-1); break; }
     case 220: test_shot(dir, "16_svg_reabierto"); break;
-    case 221: A.quit = true; break;
+    case 222: {
+        const char *png = getenv("LIENZO_TEST_POSTER");
+        if (!png) { A.quit = true; break; }
+        new_document(1080, 1350);
+        add_image_asset(asset_load_file(png), doc_center());
+        Element *e = selected();
+        e->x = 0; e->y = 0; e->w = 1080; e->h = 1350;
+        A.wand = true;
+        break;
+    }
+    case 225: test_shot(dir, "17_lapiz"); break;
+    case 226: {
+        // Tocar el círculo (arriba a la izquierda) y el título
+        Vector2 pts[2] = { { 270, 175 }, { 560, 1000 } };
+        for (int i = 0; i < 2; i++) wand_at(A.sel, pts[i]);
+        break;
+    }
+    case 227: {
+        // Mover lo separado
+        A.doc.el[2].x += 380; A.doc.el[2].y += 120;
+        A.doc.el[1].y -= 260;
+        break;
+    }
+    case 230: test_shot(dir, "18_lapiz_separado"); break;
+    case 231: A.quit = true; break;
     }
 }
 
@@ -2301,6 +2394,7 @@ int main(int argc, char **argv)
     A.lastClickSel = -1;
     A.panel = PANEL_TEMPLATES;
     A.panelOpen = true;
+    A.wandTol = 0.35f;
     strcpy(A.customW, "1080");
     strcpy(A.customH, "1080");
     new_document(1080, 1080);

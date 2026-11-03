@@ -51,6 +51,7 @@ int asset_add_png(const unsigned char *data, int size)
         UnloadImage(m);
     }
     SetTextureFilter(a->tex, TEXTURE_FILTER_TRILINEAR);
+    SetTextureWrap(a->tex, TEXTURE_WRAP_CLAMP);
     UnloadImage(img);
     return g_assetCount++;
 }

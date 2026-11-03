@@ -1,5 +1,6 @@
 // Leer dibujos SVG y convertirlos en imagen (con nanosvg, licencia zlib)
 #include "svg.h"
+#include "magic.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -242,6 +243,7 @@ static bool make_part(NSVGimage *svg, NSVGrasterizer *rast, float scale, int W, 
         for (int i = 0; i < ow * oh; i++) { crop[i * 4] = 255; crop[i * 4 + 1] = 255; crop[i * 4 + 2] = 255; }
     }
     out->img = (Image){ crop, ow, oh, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+    if (!out->single) image_bleed_edges(&out->img);
     out->x = ox / scale;
     out->y = oy / scale;
     out->w = ow / scale;

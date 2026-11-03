@@ -36,7 +36,7 @@ set(SOURCES
     src/ui.c
     src/templates.c
     src/platform.c
-    src/svg.c
+    src/svg.c src/magic.c
 )
 # nanosvg es código de otra persona: sin avisos
 set_source_files_properties(src/svg.c PROPERTIES COMPILE_OPTIONS "-w")
