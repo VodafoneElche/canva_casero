@@ -45,7 +45,7 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 1. Entra en la pestaña **Actions** del repositorio, abre la última ejecución correcta de
    "Compilar" y descarga `LienzoCasero-instalador-windows`.
    (Cuando se publique una versión, también estará en **Releases**.)
-2. Descomprime el zip y ejecuta `LienzoCasero-0.7.0-instalador.exe`.
+2. Descomprime el zip y ejecuta `LienzoCasero-0.7.1-instalador.exe`.
 3. Windows puede avisar con "Windows protegió su PC" porque el programa no está firmado:
    pulsa **Más información** y luego **Ejecutar de todas formas**.
 

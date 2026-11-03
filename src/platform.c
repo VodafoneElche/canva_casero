@@ -189,20 +189,24 @@ static const char OCR_PS1[] =
 "param([string]$img, [string]$out)\r\n"
 "$ErrorActionPreference = 'Stop'\r\n"
 "try {\r\n"
+"$img = [System.IO.Path]::GetFullPath($img)\r\n"
 "Add-Type -AssemblyName System.Runtime.WindowsRuntime\r\n"
 "$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]\r\n"
 "$null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]\r\n"
-"$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType = WindowsRuntime]\r\n"
+"$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics, ContentType = WindowsRuntime]\r\n"
+"$null = [Windows.Graphics.Imaging.SoftwareBitmap, Windows.Graphics, ContentType = WindowsRuntime]\r\n"
+"$null = [Windows.Storage.Streams.IRandomAccessStream, Windows.Storage.Streams, ContentType = WindowsRuntime]\r\n"
 "$null = [Windows.Globalization.Language, Windows.Foundation, ContentType = WindowsRuntime]\r\n"
 "$asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]\r\n"
 "function Await($op, [Type]$t) { $task = $asTask.MakeGenericMethod($t).Invoke($null, @($op)); $null = $task.Wait(-1); $task.Result }\r\n"
 "$file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($img)) ([Windows.Storage.StorageFile])\r\n"
 "$stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])\r\n"
 "$dec = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])\r\n"
-"$bmp = Await ($dec.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])\r\n"
+"$bmp = Await ($dec.GetSoftwareBitmapAsync([Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8, [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied)) ([Windows.Graphics.Imaging.SoftwareBitmap])\r\n"
 "$engine = $null\r\n"
 "foreach ($code in @('es-ES', 'es')) { if ($engine -eq $null) { $lang = New-Object Windows.Globalization.Language $code; if ([Windows.Media.Ocr.OcrEngine]::IsLanguageSupported($lang)) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($lang) } } }\r\n"
 "if ($engine -eq $null) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }\r\n"
+"if ($engine -eq $null) { throw 'Windows no tiene instalado el lector de texto para tu idioma' }\r\n"
 "$res = Await ($engine.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])\r\n"
 "$sb = New-Object System.Text.StringBuilder\r\n"
 "$ln = 0\r\n"
@@ -211,7 +215,7 @@ static const char OCR_PS1[] =
 "  $ln++\r\n"
 "}\r\n"
 "[System.IO.File]::WriteAllText($out, $sb.ToString(), (New-Object System.Text.UTF8Encoding $false))\r\n"
-"} catch { [System.IO.File]::WriteAllText($out, 'ERROR ' + $_.Exception.Message) }\r\n";
+"} catch { $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }; [System.IO.File]::WriteAllText($out, 'ERROR ' + $e.Message) }\r\n";
 
 bool plat_ocr(const char *pngPath, char *out, int max)
 {
@@ -232,15 +236,22 @@ bool plat_ocr(const char *pngPath, char *out, int max)
     free(img);
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = { 0 };
-    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) return false;
-    WaitForSingleObject(pi.hProcess, 30000);
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        snprintf(out, max, "ERROR no se puede abrir PowerShell");
+        return false;
+    }
+    if (WaitForSingleObject(pi.hProcess, 45000) == WAIT_TIMEOUT) {
+        TerminateProcess(pi.hProcess, 1);
+        snprintf(out, max, "ERROR el lector ha tardado demasiado");
+    }
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     FILE *r = _wfopen(res, L"rb");
-    if (!r) return false;
+    if (!r) { if (!out[0]) snprintf(out, max, "ERROR el lector no ha dado respuesta"); return false; }
     int n = (int)fread(out, 1, max - 1, r);
     fclose(r);
     out[n < 0 ? 0 : n] = 0;
+    // Si ha fallado, dejamos el motivo en out para enseñarlo
     if (strncmp(out, "ERROR", 5) == 0) return false;
     return true;
 }

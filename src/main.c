@@ -125,7 +125,7 @@ static bool shift_down(void) { return IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY
 static void toast(const char *msg)
 {
     strncpy(A.toast, msg, sizeof(A.toast) - 1);
-    A.toastUntil = GetTime() + 2.8;
+    A.toastUntil = GetTime() + 2.8 + strlen(msg) / 25.0;
 }
 
 static void begin_change(void)
@@ -936,6 +936,8 @@ static bool ocr_junk(const char *t)
     return true;
 }
 
+static char g_ocrError[300];
+
 static int run_ocr(Image src, int x0, int y0, int x1, int y1, OcrLine *lines, int max)
 {
     if (x0 < 0) x0 = 0;
@@ -960,7 +962,11 @@ static int run_ocr(Image src, int x0, int y0, int x1, int y1, OcrLine *lines, in
         px[i * 4 + 3] = 255;
     }
     char path[1200];
+#if defined(_WIN32)
+    snprintf(path, sizeof(path), "%s\\lector.png", plat_data_dir());
+#else
     snprintf(path, sizeof(path), "%s/lector.png", plat_data_dir());
+#endif
     int size = 0;
     unsigned char *png = ExportImageToMemory(crop, ".png", &size);
     UnloadImage(crop);
@@ -970,7 +976,12 @@ static int run_ocr(Image src, int x0, int y0, int x1, int y1, OcrLine *lines, in
     static char out[32768];
     bool ok = plat_ocr(path, out, sizeof(out));
     plat_delete_file(path);
-    if (!ok) return 0;
+    g_ocrError[0] = 0;
+    if (!ok) {
+        snprintf(g_ocrError, sizeof(g_ocrError), "%s", strncmp(out, "ERROR ", 6) == 0 ? out + 6 : out[0] ? out : "sin respuesta");
+        for (char *q = g_ocrError; *q; q++) if (*q == '\r' || *q == '\n') *q = ' ';
+        return 0;
+    }
     // Una fila por palabra: "renglón x y ancho alto<TAB>palabra"
     typedef struct { int line, x, y, w, h; char t[120]; } OcrWord;
     static OcrWord words[1500];
@@ -1257,7 +1268,10 @@ static void edit_text_box(int index)
         UnloadImage(src);
         // Sin lector: borramos y dejamos un texto vacío como antes
         wand_box(index, true);
-        toast("No he podido leer las letras: escribe tú el texto. (Necesita Windows 10 u 11 con el idioma español)");
+        char msg[500];
+        if (g_ocrError[0]) snprintf(msg, sizeof(msg), "No he podido leer las letras (%s). Escribe tú el texto.", g_ocrError);
+        else snprintf(msg, sizeof(msg), "No he encontrado letras en el recuadro. Escribe tú el texto o rodéalo un poco más grande.");
+        toast(msg);
         return;
     }
     // Borrar cada renglón por separado (así no se tocan los dibujos de alrededor)
