@@ -19,7 +19,7 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 - **Formas**: rectángulo (también con esquinas redondeadas), círculo, triángulo, estrella,
   corazón, línea y flecha. Con relleno, borde y transparencia.
 - **Dibujos**: 140 dibujos de colores en 10 temas (fiestas, amor, animales, comida, Navidad...).
-  También se pueden abrir archivos **SVG** propios, por ejemplo los de vector4free.com.
+  También se pueden abrir dibujos **SVG**, **EPS** y **AI** propios, por ejemplo los de vector4free.com o vecteezy.com.
   Al abrir un SVG puedes elegir: **entero**, **por partes** (cada bloque del dibujo es una
   capa que se mueve y se borra por separado) o **por partes y colores** (además, cada color
   es una capa a la que se le puede cambiar el color). Se respetan los recortes de Illustrator.
@@ -46,7 +46,7 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 1. Entra en la pestaña **Actions** del repositorio, abre la última ejecución correcta de
    "Compilar" y descarga `LienzoCasero-instalador-windows`.
    (Cuando se publique una versión, también estará en **Releases**.)
-2. Descomprime el zip y ejecuta `LienzoCasero-0.8.0-instalador.exe`.
+2. Descomprime el zip y ejecuta `LienzoCasero-0.9.0-instalador.exe`.
 3. Windows puede avisar con "Windows protegió su PC" porque el programa no está firmado:
    pulsa **Más información** y luego **Ejecutar de todas formas**.
 
@@ -67,7 +67,8 @@ Los diseños y plantillas de cada persona se guardan en `%APPDATA%\LienzoCasero`
 | Flechas (con Mayús. de 10 en 10) | Mover lo seleccionado |
 | Ctrl+E / Ctrl+P | Exportar PNG / PDF |
 | Ctrl+0 | Ajustar el lienzo a la ventana |
-| Rueda del ratón | Zoom |
+| Rueda del ratón o dos dedos en el pad | Mover el documento (con Mayúsculas: a los lados) |
+| Ctrl + rueda, o pellizcar en el pad | Zoom |
 | Botón derecho o Espacio + arrastrar | Mover la vista |
 
 ## Compilar desde el código
@@ -108,6 +109,7 @@ cmake -B build && cmake --build build && ./build/LienzoCasero
 | `src/templates.c` | Carpeta de plantillas y las plantillas de ejemplo |
 | `src/ui.c` | Botones, deslizadores y casillas de texto |
 | `src/svg.c` | Leer SVG y separarlos en partes |
+| `src/eps.c` | Leer dibujos EPS (y .ai antiguos) y pasarlos a SVG |
 | `src/pdf.c` | Leer PDF y sacar sus imágenes, formas y textos |
 | `src/magic.c` | Lápiz mágico y corregir texto |
 | `src/platform.c` | Ventanas de Abrir/Guardar de Windows y archivos con tildes |

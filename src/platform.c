@@ -30,7 +30,7 @@ static const wchar_t *filter_for(FileKind kind, const wchar_t **defExt)
     switch (kind) {
     case FILE_KIND_IMAGE:
         *defExt = L"png";
-        return L"Imágenes y dibujos (png, jpg, svg...)\0*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tga;*.svg\0Todos los archivos\0*.*\0";
+        return L"Imágenes y dibujos (png, jpg, svg, eps, ai...)\0*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tga;*.svg;*.eps;*.ai\0Todos los archivos\0*.*\0";
     case FILE_KIND_DESIGN:
         *defExt = L"lienzo";
         return L"Diseños de Lienzo Casero (*.lienzo)\0*.lienzo\0";
@@ -312,7 +312,7 @@ static const char *run_zenity(const char *args)
 static const char *zenity_filter(FileKind kind)
 {
     switch (kind) {
-    case FILE_KIND_IMAGE: return "--file-filter='Imágenes | *.png *.jpg *.jpeg *.bmp *.gif *.tga *.svg'";
+    case FILE_KIND_IMAGE: return "--file-filter='Imágenes | *.png *.jpg *.jpeg *.bmp *.gif *.tga *.svg *.eps *.ai *.EPS *.AI'";
     case FILE_KIND_DESIGN: return "--file-filter='Diseños | *.lienzo'";
     case FILE_KIND_PNG: return "--file-filter='PNG | *.png'";
     case FILE_KIND_PDF: return "--file-filter='PDF | *.pdf'";

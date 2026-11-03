@@ -8,6 +8,7 @@
 #include "render.h"
 #include "magic.h"
 #include "pdf.h"
+#include "eps.h"
 #include "svg.h"
 #include "templates.h"
 #include "ui.h"
@@ -539,6 +540,97 @@ static bool import_pdf(const char *path)
     return true;
 }
 
+// Un .ai moderno es un PDF por dentro: metemos sus piezas en el diseño que ya está abierto,
+// en pequeño y centradas en "at", sin cambiar de documento.
+static bool add_pdf_drawing(const unsigned char *data, int size, Vector2 at)
+{
+    PdfResult r;
+    if (!pdf_import(data, size, 0, 150.0f / 72.0f, &r) || r.count == 0 || r.pageW < 4 || r.pageH < 4) { pdf_free(&r); return false; }
+    float s = fminf(1.0f, fminf(A.doc.w * 0.8f / r.pageW, A.doc.h * 0.8f / r.pageH));
+    float ox = at.x - r.pageW * s / 2, oy = at.y - r.pageH * s / 2;
+    begin_change();
+    int added = 0;
+    for (int i = 0; i < r.count; i++) {
+        PdfItem *it = &r.items[i];
+        if (it->kind == PDF_TEXT) {
+            Element *e = doc_add(&A.doc, EL_TEXT);
+            if (!e) break;
+            snprintf(e->text, TEXT_MAX, "%s", it->text);
+            e->font = match_font(it);
+            float em = font_em_ratio(e->font);
+            e->fontSize = fmaxf(4, roundf(it->fontSize * s * em * 10) / 10);
+            e->fill = it->color;
+            e->align = it->align == 1 ? ALIGN_CENTER : it->align == 2 ? ALIGN_RIGHT : ALIGN_LEFT;
+            e->lineSpacing = it->lineSpacing > 0.3f ? it->lineSpacing / em : 0;
+            e->w = it->w * s * 1.12f + e->fontSize * 0.5f;
+            float x = ox + it->x * s;
+            if (e->align == ALIGN_CENTER) e->x = x + it->w * s / 2 - e->w / 2;
+            else if (e->align == ALIGN_RIGHT) e->x = x + it->w * s - e->w;
+            else e->x = x;
+            float ls = e->lineSpacing > 0.3f ? e->lineSpacing : 1.18f;
+            e->y = oy + it->baseline * s - (e->fontSize * (ls - 1) / 2 + font_ascent_ratio(e->font) * e->fontSize);
+            e->rotation = it->rotation;
+            fix_text_height(e);
+        } else {
+            int id = asset_add_image(it->img);
+            if (id < 0) continue;
+            if (it->kind == PDF_SHAPE) g_assets[id].hidden = true;
+            Element *e = doc_add(&A.doc, EL_IMAGE);
+            if (!e) break;
+            e->asset = id;
+            e->x = ox + it->x * s; e->y = oy + it->y * s; e->w = it->w * s; e->h = it->h * s;
+            e->rotation = it->rotation;
+            e->opacity = it->opacity > 0 ? it->opacity : 1;
+            e->tint = it->tint;
+            e->fill = it->tint ? it->color : WHITE;
+            e->stroke = WHITE;
+            snprintf(e->text, TEXT_MAX, "%s", it->kind == PDF_SHAPE ? "Dibujo" : "Imagen");
+        }
+        added++;
+    }
+    pdf_free(&r);
+    if (added == 0) return false;
+    char m[120];
+    snprintf(m, sizeof(m), "Dibujo añadido en %d partes. Míralas en \"Capas\".", added);
+    toast(m);
+    return true;
+}
+
+// Dibujos EPS y AI (los que bajas de Vecteezy, Freepik...). Un EPS o un .ai antiguo es
+// PostScript: lo pasamos a SVG y se abre como cualquier SVG (entero o por partes).
+static void import_vector(const char *path, Vector2 at)
+{
+    int size = 0;
+    unsigned char *data = plat_read_file(path, &size);
+    if (!data) { plat_message(APP_NAME, "No se ha podido abrir ese archivo."); return; }
+    // Un .ai moderno empieza por %PDF (a veces tras unos bytes de cabecera)
+    bool isPdf = false;
+    for (int i = 0; i + 4 <= size && i < 1024; i++) if (memcmp(data + i, "%PDF", 4) == 0) { isPdf = true; break; }
+    if (isPdf) {
+        bool ok = add_pdf_drawing(data, size, at);
+        free(data);
+        if (!ok) plat_message(APP_NAME, "No se ha podido leer ese dibujo AI. Si puedes, descarga el mismo dibujo en EPS o SVG.");
+        return;
+    }
+    int skipped = 0;
+    char *svg = eps_to_svg(data, size, &skipped);
+    free(data);
+    if (!svg) { plat_message(APP_NAME, "No se ha podido leer ese dibujo. Si puedes, descarga el mismo dibujo en SVG."); return; }
+    char out[1200];
+#ifdef _WIN32
+    snprintf(out, sizeof(out), "%s\\%s.svg", plat_data_dir(), GetFileNameWithoutExt(path));
+#else
+    snprintf(out, sizeof(out), "%s/%s.svg", plat_data_dir(), GetFileNameWithoutExt(path));
+#endif
+    bool ok = plat_write_file(out, svg, (int)strlen(svg));
+    free(svg);
+    if (!ok) { plat_message(APP_NAME, "No se ha podido preparar ese dibujo."); return; }
+    if (skipped > 0) toast("Algunos detalles del dibujo (degradados o fotos) no se han podido copiar.");
+    ask_svg(out, at);
+}
+
+static bool is_vector_file(const char *p) { return IsFileExtension(p, ".eps;.EPS;.ai;.AI;.epsf;.ps"); }
+
 static void cmd_import_pdf(void)
 {
     if (!confirm_discard()) return;
@@ -552,6 +644,7 @@ static void cmd_upload_image(void)
     const char *p = plat_open_dialog("Elegir una imagen", FILE_KIND_IMAGE);
     if (!p) return;
     if (IsFileExtension(p, ".svg;.SVG")) { ask_svg(p, doc_center()); return; }
+    if (is_vector_file(p)) { import_vector(p, doc_center()); return; }
     int id = asset_load_file(p);
     if (id < 0) { plat_message(APP_NAME, "No se ha podido leer esa imagen. Prueba con una foto PNG o JPG."); return; }
     add_image_asset(id, doc_center());
@@ -1829,8 +1922,23 @@ static void canvas_input(Rectangle cr)
     bool space = IsKeyDown(KEY_SPACE) && !A.editing && !ui_textbox_focused();
 
     if (over) {
-        float wheel = GetMouseWheelMove();
-        if (wheel != 0) zoom_at(m, wheel > 0 ? 1.12f : 1 / 1.12f);
+        // Como en Canva: rueda o dos dedos en el pad = mover el documento; Ctrl + rueda (o
+        // pellizcar en el pad) = zoom; Mayúsculas + rueda = a izquierda y derecha
+        Vector2 wv = GetMouseWheelMoveV();
+        if (wv.x != 0 || wv.y != 0) {
+            if (ctrl_down()) {
+                float z = wv.y != 0 ? wv.y : wv.x;
+                zoom_at(m, powf(1.12f, fmaxf(-3, fminf(3, z))));
+            } else {
+                float dx = -wv.x, dy = -wv.y;
+                if (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) { dx = -wv.y; dy = 0; }
+                A.cam.target.x += dx * 60 / A.cam.zoom;
+                A.cam.target.y += dy * 60 / A.cam.zoom;
+                // Que el documento no se pierda de vista
+                A.cam.target.x = fmaxf(0, fminf((float)A.doc.w, A.cam.target.x));
+                A.cam.target.y = fmaxf(0, fminf((float)A.doc.h, A.cam.target.y));
+            }
+        }
     }
 
     // Mover la vista: botón derecho, rueda pulsada o espacio + clic
@@ -2960,10 +3068,10 @@ static void add_clip(int i)
 static float panel_clipart(float x, float y, float w)
 {
     clipart_init();
-    if (ui_button((Rectangle){ x, y, w, 42 }, "Abrir un dibujo SVG del ordenador", BTN_NORMAL)) cmd_upload_image();
+    if (ui_button((Rectangle){ x, y, w, 42 }, "Abrir un dibujo SVG, EPS o AI", BTN_NORMAL)) cmd_upload_image();
     y += 48;
     ui_text("Por ejemplo, los que descargues de", x, y, 14, COL_MUTED);
-    ui_text("vector4free.com para uso en casa.", x, y + 18, 14, COL_MUTED);
+    ui_text("vector4free o vecteezy, para uso en casa.", x, y + 18, 14, COL_MUTED);
     y += 48;
     if (g_clipCount == 0) {
         ui_text("No se encuentra la carpeta \"dibujos\".", x, y, 15, COL_MUTED);
@@ -3376,7 +3484,7 @@ static void draw_bottombar(void)
     Rectangle bb = { cr.x, cr.y + cr.height, cr.width, BOTTOM_H };
     DrawRectangleRec(bb, COL_PANEL);
     DrawLine((int)bb.x, (int)bb.y, (int)(bb.x + bb.width), (int)bb.y, COL_BORDER);
-    ui_text("Rueda: zoom  ·  Botón derecho o Espacio: mover la vista  ·  Doble clic: escribir", bb.x + 16, bb.y + 11, 14, COL_MUTED);
+    ui_text("Rueda: mover  ·  Ctrl + rueda: zoom  ·  Botón derecho o Espacio: arrastrar la vista  ·  Doble clic: escribir", bb.x + 16, bb.y + 11, 14, COL_MUTED);
     float x = bb.x + bb.width - 16 - 300;
     if (x < bb.x + 560) return;
     if (ui_button((Rectangle){ x, bb.y + 5, 30, 30 }, "-", BTN_GHOST)) zoom_at(A.cam.offset, 0.8f);
@@ -3426,6 +3534,7 @@ static void handle_drops(void)
             continue;
         }
         if (IsFileExtension(p, ".svg;.SVG") && A.modal == MODAL_NONE) { ask_svg(p, at); continue; }
+        if (is_vector_file(p) && A.modal == MODAL_NONE) { import_vector(p, at); continue; }
         int id = asset_load_file(p);
         if (id >= 0) {
             add_image_asset(id, at);
@@ -3534,7 +3643,8 @@ static void test_step(const char *dir, int frame)
         const char *svg = getenv("LIENZO_TEST_SVG2");
         if (!svg) { A.quit = true; break; }
         new_document(1754, 1240);
-        ask_svg(svg, doc_center());
+        if (is_vector_file(svg)) import_vector(svg, doc_center());
+        else ask_svg(svg, doc_center());
         break;
     }
     case 205: test_shot(dir, "13_svg_pregunta"); A.modal = MODAL_NONE; break;
