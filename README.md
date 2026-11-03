@@ -23,6 +23,13 @@ sin internet en **Windows 10 y 11 (64 bits)**.
   Al abrir un SVG puedes elegir: **entero**, **por partes** (cada bloque del dibujo es una
   capa que se mueve y se borra por separado) o **por partes y colores** (además, cada color
   es una capa a la que se le puede cambiar el color). Se respetan los recortes de Illustrator.
+- **Importar PDF** (por ejemplo, un diseño descargado de Canva): cada foto, dibujo y texto
+  sale como una capa suelta, y los textos se pueden reescribir. Menú *Archivo > Importar PDF*
+  o arrastrando el PDF a la ventana.
+- **Lápiz mágico** (para fotos y JPEG): toca o rodea un dibujo o un texto de la imagen y se
+  separa del fondo como una capa nueva. Funciona también con fondos de degradado.
+- **Corregir texto** (para JPEG): rodea un texto de la imagen; se borra rellenando el hueco con
+  el fondo y aparece un texto nuevo del mismo color para escribirlo bien.
 - **Imágenes**: desde el ordenador, arrastrándolas a la ventana o pegándolas con Ctrl+V.
   Se guardan dentro del diseño, así que un `.lienzo` se puede pasar a otro ordenador.
 - **Mover, cambiar de tamaño y girar** con el ratón. Imán para centrar en el lienzo.
@@ -36,7 +43,7 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 1. Entra en la pestaña **Actions** del repositorio, abre la última ejecución correcta de
    "Compilar" y descarga `LienzoCasero-instalador-windows`.
    (Cuando se publique una versión, también estará en **Releases**.)
-2. Descomprime el zip y ejecuta `LienzoCasero-0.4.0-instalador.exe`.
+2. Descomprime el zip y ejecuta `LienzoCasero-0.5.0-instalador.exe`.
 3. Windows puede avisar con "Windows protegió su PC" porque el programa no está firmado:
    pulsa **Más información** y luego **Ejecutar de todas formas**.
 
@@ -97,13 +104,15 @@ cmake -B build && cmake --build build && ./build/LienzoCasero
 | `src/render.c` | Cómo se dibuja cada cosa, los tipos de letra y exportar a PNG/PDF |
 | `src/templates.c` | Carpeta de plantillas y las plantillas de ejemplo |
 | `src/ui.c` | Botones, deslizadores y casillas de texto |
+| `src/svg.c` | Leer SVG y separarlos en partes |
+| `src/pdf.c` | Leer PDF y sacar sus imágenes, formas y textos |
+| `src/magic.c` | Lápiz mágico y corregir texto |
 | `src/platform.c` | Ventanas de Abrir/Guardar de Windows y archivos con tildes |
 | `installer/` | Script del instalador (NSIS) |
 
 ## Próximos pasos
 
-- Importar diseños descargados de Canva en PDF, con los textos como capas editables.
-- Lápiz mágico: separar del fondo la parte de una imagen que toques.
+- PDF de varias páginas (ahora se abre la primera) y degradados dentro de los PDF.
 - Agrupar y seleccionar varios elementos a la vez.
 - Recortar imágenes y filtros sencillos.
 

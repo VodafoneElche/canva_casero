@@ -7,10 +7,12 @@
 #include "platform.h"
 #include "render.h"
 #include "magic.h"
+#include "pdf.h"
 #include "svg.h"
 #include "templates.h"
 #include "ui.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -102,7 +104,10 @@ static struct {
 
     char templateName[128];
     bool wand;              // lápiz mágico activo
+    bool fixText;           // corregir un texto de una imagen
     float wandTol;
+    bool boxDrag;           // dibujando un recuadro con el lápiz
+    Vector2 boxStart, boxEnd;
     char svgPath[2048];     // SVG esperando a que elijas "entero" o "por partes"
     Vector2 svgAt;
     char customW[16], customH[16];
@@ -195,7 +200,7 @@ static void stop_editing(void)
 
 static void select_index(int i)
 {
-    if (i != A.sel) { stop_editing(); A.wand = false; }
+    if (i != A.sel) { stop_editing(); A.wand = false; A.fixText = false; A.boxDrag = false; }
     A.sel = i;
 }
 
@@ -416,6 +421,123 @@ static void ask_svg(const char *path, Vector2 at)
     snprintf(A.svgPath, sizeof(A.svgPath), "%s", path);
     A.svgAt = at;
     A.modal = MODAL_SVG;
+}
+
+// ---- Importar PDF ----
+
+static void norm_name(const char *in, char *out, int max)
+{
+    int n = 0;
+    for (const char *p = in; *p && n < max - 1; p++)
+        if (isalnum((unsigned char)*p)) out[n++] = (char)tolower((unsigned char)*p);
+    out[n] = 0;
+}
+
+// Elige la fuente nuestra que más se parece a la del PDF
+static int match_font(const PdfItem *it)
+{
+    char full[80], fam[80];
+    norm_name(it->font, full, sizeof(full));
+    char famRaw[80];
+    snprintf(famRaw, sizeof(famRaw), "%s", it->font);
+    char *cut = strpbrk(famRaw, "-,_");
+    if (cut) *cut = 0;
+    norm_name(famRaw, fam, sizeof(fam));
+    // Quitamos "MT", "PS", "Std" del final de la familia
+    int best = -1, bestScore = 0;
+    for (int i = 0; i < g_fontCount; i++) {
+        char nm[80], file[80];
+        norm_name(g_fonts[i].name, nm, sizeof(nm));
+        norm_name(GetFileNameWithoutExt(g_fonts[i].path), file, sizeof(file));
+        int score = 0;
+        if (full[0] && (strcmp(file, full) == 0)) score = 100;
+        else if (fam[0] && strlen(fam) >= 4 && (strncmp(file, fam, strlen(fam)) == 0 || strncmp(nm, fam, strlen(fam)) == 0)) {
+            score = 50;
+            bool fb = strstr(file, "bold") || strstr(file, "black") || strstr(nm, "negrita");
+            if (fb == it->bold) score += 10;
+        }
+        if (score > bestScore) { bestScore = score; best = i; }
+    }
+    if (best >= 0) return best;
+    const char *fallback = it->script ? "Manuscrita" : it->serif ? (it->bold ? "Clásica negrita" : "Clásica") : (it->bold ? "Moderna negrita" : "Moderna");
+    int f = font_find(fallback);
+    return f >= 0 ? f : 0;
+}
+
+static bool import_pdf(const char *path)
+{
+    int size = 0;
+    unsigned char *data = plat_read_file(path, &size);
+    if (!data) return false;
+    PdfResult r;
+    bool ok = pdf_import(data, size, 0, 150.0f / 72.0f, &r);
+    free(data);
+    if (!ok || r.pageW < 16 || r.pageH < 16) { pdf_free(&r); return false; }
+    new_document((int)r.pageW, (int)r.pageH);
+    int start = 0;
+    // Un rectángulo de un color que cubre toda la página es el fondo
+    if (r.count > 0 && r.items[0].kind == PDF_SHAPE && r.items[0].tint && r.items[0].w >= r.pageW * 0.98f && r.items[0].h >= r.pageH * 0.98f) {
+        A.doc.bg = r.items[0].color;
+        start = 1;
+    }
+    int added = 0, texts = 0;
+    for (int i = start; i < r.count; i++) {
+        PdfItem *it = &r.items[i];
+        if (it->kind == PDF_TEXT) {
+            Element *e = doc_add(&A.doc, EL_TEXT);
+            if (!e) break;
+            snprintf(e->text, TEXT_MAX, "%s", it->text);
+            e->font = match_font(it);
+            float em = font_em_ratio(e->font);
+            e->fontSize = fmaxf(4, roundf(it->fontSize * em * 10) / 10);
+            e->fill = it->color;
+            e->align = it->align == 1 ? ALIGN_CENTER : it->align == 2 ? ALIGN_RIGHT : ALIGN_LEFT;
+            // El interlineado del PDF va en "em"; el nuestro, en alto de letra
+            e->lineSpacing = it->lineSpacing > 0.3f ? it->lineSpacing / em : 0;
+            // Un poco más ancho: nuestras fuentes pueden ocupar algo más que las del PDF
+            e->w = it->w * 1.12f + e->fontSize * 0.5f;
+            if (e->align == ALIGN_CENTER) e->x = it->x + it->w / 2 - e->w / 2;
+            else if (e->align == ALIGN_RIGHT) e->x = it->x + it->w - e->w;
+            else e->x = it->x;
+            float ls = e->lineSpacing > 0.3f ? e->lineSpacing : 1.18f;
+            e->y = it->baseline - (e->fontSize * (ls - 1) / 2 + font_ascent_ratio(e->font) * e->fontSize);
+            e->rotation = it->rotation;
+            fix_text_height(e);
+            texts++;
+        } else {
+            int id = asset_add_image(it->img);
+            if (id < 0) continue;
+            Element *e = doc_add(&A.doc, EL_IMAGE);
+            if (!e) break;
+            e->asset = id;
+            e->x = it->x; e->y = it->y; e->w = it->w; e->h = it->h;
+            e->rotation = it->rotation;
+            e->opacity = it->opacity > 0 ? it->opacity : 1;
+            e->tint = it->tint;
+            e->fill = it->tint ? it->color : WHITE;
+            e->stroke = WHITE;
+            snprintf(e->text, TEXT_MAX, "%s", it->kind == PDF_SHAPE ? "Dibujo" : "Imagen");
+        }
+        added++;
+    }
+    char msg[200];
+    if (r.pages > 1) snprintf(msg, sizeof(msg), "PDF abierto (página 1 de %d): %d piezas, %d textos para editar", r.pages, added, texts);
+    else snprintf(msg, sizeof(msg), "PDF abierto: %d piezas, %d textos para editar", added, texts);
+    toast(msg);
+    pdf_free(&r);
+    A.panel = PANEL_LAYERS;
+    A.panelOpen = true;
+    A.panelScroll = 0;
+    fit_view();
+    return true;
+}
+
+static void cmd_import_pdf(void)
+{
+    if (!confirm_discard()) return;
+    const char *p = plat_open_dialog("Importar un PDF", FILE_KIND_PDF);
+    if (!p) return;
+    if (!import_pdf(p)) plat_message(APP_NAME, "No se ha podido leer ese PDF. Si lo descargaste de Canva, prueba a descargarlo otra vez como \"PDF estándar\".");
 }
 
 static void cmd_upload_image(void)
@@ -709,6 +831,83 @@ static void wand_at(int index, Vector2 w)
     toast("Parte separada: ya la puedes mover. Toca otra o pulsa Esc para terminar.");
 }
 
+// Recuadro en coordenadas del lienzo -> píxeles de la imagen del elemento
+static void box_to_pixels(const Element *e, int imgW, int imgH, int *x0, int *y0, int *x1, int *y1)
+{
+    Vector2 a = to_local(e, A.boxStart), b = to_local(e, A.boxEnd);
+    float ax = (fminf(a.x, b.x) + e->w / 2) / e->w * imgW, bx = (fmaxf(a.x, b.x) + e->w / 2) / e->w * imgW;
+    float ay = (fminf(a.y, b.y) + e->h / 2) / e->h * imgH, by = (fmaxf(a.y, b.y) + e->h / 2) / e->h * imgH;
+    *x0 = (int)ax; *y0 = (int)ay; *x1 = (int)bx; *y1 = (int)by;
+}
+
+// Separa lo que hay dentro del recuadro. asText: en vez de una imagen, deja un texto para escribir
+static void wand_box(int index, bool asText)
+{
+    Element *e = &A.doc.el[index];
+    if (e->asset < 0 || e->asset >= g_assetCount) return;
+    Asset *as = &g_assets[e->asset];
+    Image src = LoadImageFromMemory(".png", as->png, as->pngSize);
+    if (!src.data) return;
+    int x0, y0, x1, y1;
+    box_to_pixels(e, src.width, src.height, &x0, &y0, &x1, &y1);
+    Image part, rest;
+    int bx, by;
+    Color main;
+    int ok = magic_extract_box(src, x0, y0, x1, y1, A.wandTol, &part, &bx, &by, &rest, &main);
+    UnloadImage(src);
+    if (!ok) { toast("En ese recuadro no hay nada que separar del fondo."); return; }
+    float sx = e->w / (float)rest.width, sy = e->h / (float)rest.height;
+    int pw = part.width, ph = part.height;
+    int restId = asset_add_image(rest);
+    int partId = asText ? -1 : asset_add_image(part);
+    UnloadImage(part);
+    UnloadImage(rest);
+    if (restId < 0 || (!asText && partId < 0)) { toast("No caben más imágenes en este diseño"); return; }
+    begin_change();
+    e = &A.doc.el[index];
+    Element orig = *e;
+    e->asset = restId;
+    Vector2 lc = { (bx + pw / 2.0f) * sx - orig.w / 2, (by + ph / 2.0f) * sy - orig.h / 2 };
+    Vector2 c = to_world(&orig, lc);
+    if (asText) {
+        Element *n = doc_add(&A.doc, EL_TEXT);
+        if (!n) return;
+        n->text[0] = 0;
+        n->fill = main;
+        n->align = ALIGN_CENTER;
+        int fi = font_find("Moderna negrita");
+        n->font = fi >= 0 ? fi : 0;
+        // Las mayúsculas ocupan unas tres cuartas partes del tamaño de letra
+        n->fontSize = fmaxf(10, roundf(ph * sy / 0.75f));
+        n->w = fmaxf(pw * sx * 1.25f, n->fontSize * 4);
+        n->rotation = orig.rotation;
+        fix_text_height(n);
+        n->x = c.x - n->w / 2;
+        n->y = c.y - n->h / 2;
+        int ni = doc_move_layer(&A.doc, A.doc.count - 1, index + 1 - (A.doc.count - 1));
+        A.fixText = false;
+        select_index(ni);
+        A.editing = true;
+        A.editPushed = true;
+        A.caret = 0;
+        toast("Escribe el texto corregido. Arriba puedes cambiar la letra, el tamaño y el color.");
+    } else {
+        Element *n = doc_add(&A.doc, EL_IMAGE);
+        if (!n) return;
+        *n = orig;
+        n->asset = partId;
+        n->w = pw * sx;
+        n->h = ph * sy;
+        n->x = c.x - n->w / 2;
+        n->y = c.y - n->h / 2;
+        n->locked = false;
+        snprintf(n->text, TEXT_MAX, "Recorte");
+        doc_move_layer(&A.doc, A.doc.count - 1, index + 1 - (A.doc.count - 1));
+        A.sel = index;
+        toast("Parte separada: ya la puedes mover. Rodea otra o pulsa Esc para terminar.");
+    }
+}
+
 static void canvas_input(Rectangle cr)
 {
     Vector2 m = GetMousePosition();
@@ -736,13 +935,26 @@ static void canvas_input(Rectangle cr)
     }
 
     Element *sel = selected();
-    if (A.wand && (!sel || sel->type != EL_IMAGE)) A.wand = false;
-    if (A.wand && over && A.drag == DRAG_NONE) {
+    if ((A.wand || A.fixText) && (!sel || sel->type != EL_IMAGE)) { A.wand = false; A.fixText = false; A.boxDrag = false; }
+    if (A.boxDrag) {
+        A.boxEnd = w;
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+            A.boxDrag = false;
+            Vector2 a = GetWorldToScreen2D(A.boxStart, A.cam), b = GetWorldToScreen2D(A.boxEnd, A.cam);
+            bool click = fabsf(a.x - b.x) < 6 && fabsf(a.y - b.y) < 6;
+            if (click && A.wand) wand_at(A.sel, A.boxStart);
+            else if (click) toast("Arrastra para rodear el texto que quieres corregir");
+            else wand_box(A.sel, A.fixText);
+        }
+        return;
+    }
+    if ((A.wand || A.fixText) && over && A.drag == DRAG_NONE) {
         bool onIt = hit_element(sel, w, 0);
         if (onIt) SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !space) {
-            if (onIt) { wand_at(A.sel, w); return; }
+            if (onIt) { A.boxDrag = true; A.boxStart = A.boxEnd = w; return; }
             A.wand = false;
+            A.fixText = false;
         }
     }
     if (over && A.drag == DRAG_NONE && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !space) {
@@ -940,7 +1152,7 @@ static void shortcuts(void)
     if (c) return;
 
     Element *e = selected();
-    if (IsKeyPressed(KEY_ESCAPE)) { A.popup = POP_NONE; if (A.wand) A.wand = false; else select_index(-1); }
+    if (IsKeyPressed(KEY_ESCAPE)) { A.popup = POP_NONE; if (A.wand || A.fixText) { A.wand = false; A.fixText = false; A.boxDrag = false; } else select_index(-1); }
     if (!e) return;
     if (IsKeyPressed(KEY_DELETE) || IsKeyPressed(KEY_BACKSPACE)) { if (!e->locked) cmd_delete(); return; }
     if ((IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_F2)) && e->type == EL_TEXT && !e->locked) {
@@ -1020,6 +1232,13 @@ static void draw_canvas(Rectangle cr)
     if (A.drag == DRAG_NONE && ui_mouse_free() && A.popup == POP_NONE && CheckCollisionPointRec(GetMousePosition(), cr)) {
         int h = pick(mw);
         if (h >= 0 && h != A.sel) draw_element_outline(&A.doc.el[h], (Color){ 109, 74, 255, 140 }, 1.5f);
+    }
+
+    if (A.boxDrag) {
+        Vector2 a = GetWorldToScreen2D(A.boxStart, A.cam), b = GetWorldToScreen2D(A.boxEnd, A.cam);
+        Rectangle br = { fminf(a.x, b.x), fminf(a.y, b.y), fabsf(a.x - b.x), fabsf(a.y - b.y) };
+        DrawRectangleRec(br, (Color){ 109, 74, 255, 40 });
+        DrawRectangleLinesEx(br, 2, COL_ACCENT);
     }
 
     Element *e = selected();
@@ -1137,13 +1356,15 @@ static void draw_popup(void)
     ui_set_layer(1);
     Rectangle r = { 0 };
     if (A.popup == POP_FILE) {
-        r = popup_place(A.popupAnchor, 300, 6 * 42 + 16);
+        r = popup_place(A.popupAnchor, 300, 7 * 42 + 16);
         popup_card(r);
         float y = r.y + 8;
         PopupId keep = POP_NONE;
         if (menu_item((Rectangle){ r.x + 8, y, r.width - 16, 40 }, "Nuevo diseño...", "Ctrl+N")) A.modal = MODAL_NEW;
         y += 42;
         if (menu_item((Rectangle){ r.x + 8, y, r.width - 16, 40 }, "Abrir...", "Ctrl+O")) { A.popup = POP_NONE; cmd_open(); }
+        y += 42;
+        if (menu_item((Rectangle){ r.x + 8, y, r.width - 16, 40 }, "Importar PDF (de Canva...)", NULL)) { A.popup = POP_NONE; cmd_import_pdf(); }
         y += 42;
         if (menu_item((Rectangle){ r.x + 8, y, r.width - 16, 40 }, "Guardar", "Ctrl+S")) { A.popup = POP_NONE; cmd_save(false); }
         y += 42;
@@ -2129,10 +2350,18 @@ static void draw_toolbar(void)
         Rectangle wb = { x, y + 10, 140, 36 };
         if (ui_button(wb, A.wand ? "Terminar" : "Lápiz mágico", A.wand ? BTN_PRIMARY : BTN_NORMAL)) {
             A.wand = !A.wand;
-            if (A.wand) toast("Toca un dibujo o un texto de la imagen para separarlo del fondo");
+            A.fixText = false;
+            if (A.wand) toast("Toca un dibujo, o rodéalo arrastrando, para separarlo del fondo");
         }
-        x += 154;
-        if (A.wand) {
+        x += 150;
+        Rectangle fb2 = { x, y + 10, 150, 36 };
+        if (ui_button(fb2, A.fixText ? "Terminar" : "Corregir texto", A.fixText ? BTN_PRIMARY : BTN_NORMAL)) {
+            A.fixText = !A.fixText;
+            A.wand = false;
+            if (A.fixText) toast("Rodea arrastrando el texto que quieres cambiar: se borra y podrás escribirlo de nuevo");
+        }
+        x += 164;
+        if (A.wand || A.fixText) {
             tb_label("Parecido al fondo", x, y);
             ui_slider(5, (Rectangle){ x + 4, y + 30, 120 - 8, 12 }, &A.wandTol, 0, 1);
             x += 134;
@@ -2208,6 +2437,10 @@ static void handle_drops(void)
         const char *p = files.paths[i];
         if (IsFileExtension(p, ".lienzo")) {
             if (confirm_discard()) open_path(p);
+            break;
+        }
+        if (IsFileExtension(p, ".pdf;.PDF")) {
+            if (confirm_discard() && !import_pdf(p)) plat_message(APP_NAME, "No se ha podido leer ese PDF.");
             break;
         }
         if (IsFileExtension(p, ".ttf;.otf;.TTF;.OTF")) {
@@ -2345,28 +2578,49 @@ static void test_step(const char *dir, int frame)
     case 222: {
         const char *png = getenv("LIENZO_TEST_POSTER");
         if (!png) { A.quit = true; break; }
-        new_document(1080, 1350);
+        Image im = LoadImage(png);
+        new_document(im.width, im.height);
+        UnloadImage(im);
         add_image_asset(asset_load_file(png), doc_center());
         Element *e = selected();
-        e->x = 0; e->y = 0; e->w = 1080; e->h = 1350;
-        A.wand = true;
+        e->x = 0; e->y = 0; e->w = (float)A.doc.w; e->h = (float)A.doc.h;
         break;
     }
     case 225: test_shot(dir, "17_lapiz"); break;
     case 226: {
-        // Tocar el círculo (arriba a la izquierda) y el título
-        Vector2 pts[2] = { { 270, 175 }, { 560, 1000 } };
-        for (int i = 0; i < 2; i++) wand_at(A.sel, pts[i]);
+        // Corregir la primera línea del texto gris
+        A.boxStart = (Vector2){ 232, 368 }; A.boxEnd = (Vector2){ 1058, 418 };
+        wand_box(0, true);
+        Element *t = selected();
+        if (t) { snprintf(t->text, TEXT_MAX, "HOY VAMOS A APUNTAR ALGUNAS"); fix_text_height(t); }
+        stop_editing();
+        // Separar la espiral de la izquierda y el teléfono
+        select_index(0);
+        A.boxStart = (Vector2){ 30, 555 }; A.boxEnd = (Vector2){ 108, 635 };
+        wand_box(0, false);
+        A.boxStart = (Vector2){ 680, 1505 }; A.boxEnd = (Vector2){ 990, 1585 };
+        wand_box(0, false);
         break;
     }
     case 227: {
         // Mover lo separado
-        A.doc.el[2].x += 380; A.doc.el[2].y += 120;
-        A.doc.el[1].y -= 260;
+        for (int i = 0; i < A.doc.count; i++) if (A.doc.el[i].type == EL_IMAGE && A.doc.el[i].w < 120) { A.doc.el[i].x += 520; A.doc.el[i].y += 900; }
+        for (int i = 0; i < A.doc.count; i++) if (A.doc.el[i].type == EL_IMAGE && A.doc.el[i].w > 200 && A.doc.el[i].w < 400) { A.doc.el[i].x -= 560; A.doc.el[i].y -= 60; }
+        select_index(-1);
         break;
     }
     case 230: test_shot(dir, "18_lapiz_separado"); break;
-    case 231: A.quit = true; break;
+    case 232: {
+        const char *pdf = getenv("LIENZO_TEST_PDF");
+        if (!pdf) { A.quit = true; break; }
+        A.dirty = false;
+        if (!import_pdf(pdf)) printf("PDF: no se ha podido importar\n");
+        break;
+    }
+    case 236: test_shot(dir, "19_pdf"); { char p[1200]; snprintf(p, sizeof(p), "%s/pdf.png", dir); export_png(&A.doc, p); } break;
+    case 237: A.panelOpen = false; select_index(-1); fit_view(); break;
+    case 240: test_shot(dir, "20_pdf_lienzo"); break;
+    case 241: A.quit = true; break;
     }
 }
 

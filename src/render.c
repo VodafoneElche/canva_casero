@@ -131,6 +131,55 @@ static void register_dir(const char *dir, int group)
     qsort(&g_fonts[start], g_fontCount - start, sizeof(FontEntry), cmp_fonts);
 }
 
+// Medidas de la fuente desde su archivo (tablas head y hhea).
+// raylib usa "tamaño = de arriba a abajo de la letra", no el "em" de los PDF y de Canva.
+static float g_emRatio[MAX_FONTS], g_ascRatio[MAX_FONTS];
+static bool g_metricsRead[MAX_FONTS];
+
+static unsigned rd16(const unsigned char *p) { return (unsigned)(p[0] << 8 | p[1]); }
+static unsigned rd32(const unsigned char *p) { return (unsigned)p[0] << 24 | (unsigned)p[1] << 16 | (unsigned)p[2] << 8 | p[3]; }
+
+static void read_metrics(int index)
+{
+    g_metricsRead[index] = true;
+    g_emRatio[index] = 1.2f;
+    g_ascRatio[index] = 0.8f;
+    int size = 0;
+    unsigned char *d = plat_read_file(g_fonts[index].path, &size);
+    if (!d) return;
+    unsigned base = 0;
+    if (size > 16 && memcmp(d, "ttcf", 4) == 0) base = rd32(d + 12);
+    if (base + 12 > (unsigned)size) { free(d); return; }
+    unsigned n = rd16(d + base + 4);
+    int upm = 0, asc = 0, desc = 0;
+    for (unsigned i = 0; i < n && base + 12 + i * 16 + 16 <= (unsigned)size; i++) {
+        const unsigned char *t = d + base + 12 + i * 16;
+        unsigned off = rd32(t + 8);
+        if (off + 8 > (unsigned)size) continue;
+        if (memcmp(t, "head", 4) == 0 && off + 20 <= (unsigned)size) upm = (int)rd16(d + off + 18);
+        if (memcmp(t, "hhea", 4) == 0) { asc = (short)rd16(d + off + 4); desc = (short)rd16(d + off + 6); }
+    }
+    free(d);
+    if (upm > 0 && asc - desc > 0) {
+        g_emRatio[index] = (float)(asc - desc) / (float)upm;
+        g_ascRatio[index] = (float)asc / (float)(asc - desc);
+    }
+}
+
+float font_em_ratio(int index)
+{
+    if (index < 0 || index >= g_fontCount) return 1.2f;
+    if (!g_metricsRead[index]) read_metrics(index);
+    return g_emRatio[index];
+}
+
+float font_ascent_ratio(int index)
+{
+    if (index < 0 || index >= g_fontCount) return 0.8f;
+    if (!g_metricsRead[index]) read_metrics(index);
+    return g_ascRatio[index];
+}
+
 const char *fonts_user_dir(void)
 {
     static char dir[1100] = {0};
@@ -378,7 +427,8 @@ static int layout_text(const Element *e, TextLine *lines, int maxLines)
     return n;
 }
 
-#define LINE_SPACING 1.18f
+#define LINE_SPACING_DEFAULT 1.18f
+#define LINE_SPACING (e->lineSpacing > 0.3f ? e->lineSpacing : LINE_SPACING_DEFAULT)
 
 float text_height(const Element *e)
 {

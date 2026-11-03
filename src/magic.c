@@ -254,3 +254,129 @@ void image_bleed_edges(Image *img)
     }
     free(done);
 }
+
+// ------------------------------------------------------------------ Por recuadro
+// Para carteles con fondos de degradado o con textura: el fondo se calcula a partir
+// del borde del recuadro que dibujas, y el hueco se rellena mezclando ese borde.
+
+static int cmp_uc(const void *a, const void *b) { return *(const unsigned char *)a - *(const unsigned char *)b; }
+
+// Mediana de 7 en una fila de píxeles (quita trocitos de dibujo que toca el borde)
+static void median_line(Px *line, int n)
+{
+    Px *tmp = (Px *)malloc(sizeof(Px) * n);
+    memcpy(tmp, line, sizeof(Px) * n);
+    for (int i = 0; i < n; i++) {
+        unsigned char r[7], g[7], b[7];
+        int k = 0;
+        for (int d = -3; d <= 3; d++) {
+            int j = i + d < 0 ? 0 : i + d >= n ? n - 1 : i + d;
+            r[k] = tmp[j].r; g[k] = tmp[j].g; b[k] = tmp[j].b; k++;
+        }
+        qsort(r, 7, 1, cmp_uc); qsort(g, 7, 1, cmp_uc); qsort(b, 7, 1, cmp_uc);
+        line[i] = (Px){ r[3], g[3], b[3], 255 };
+    }
+    free(tmp);
+}
+
+int magic_extract_box(Image src, int x0, int y0, int x1, int y1, float tolerance,
+                      Image *part, int *bx, int *by, Image *rest, Color *mainColor)
+{
+    Image img = ImageCopy(src);
+    ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    int W = img.width, H = img.height;
+    if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+    if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > W - 1) x1 = W - 1;
+    if (y1 > H - 1) y1 = H - 1;
+    int bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+    if (bw < 4 || bh < 4) { UnloadImage(img); return 0; }
+    Px *p = (Px *)img.data;
+
+    // Bordes del recuadro, suavizados
+    Px *top = (Px *)malloc(sizeof(Px) * bw), *bot = (Px *)malloc(sizeof(Px) * bw);
+    Px *lef = (Px *)malloc(sizeof(Px) * bh), *rig = (Px *)malloc(sizeof(Px) * bh);
+    for (int x = 0; x < bw; x++) { top[x] = p[y0 * W + x0 + x]; bot[x] = p[y1 * W + x0 + x]; }
+    for (int y = 0; y < bh; y++) { lef[y] = p[(y0 + y) * W + x0]; rig[y] = p[(y0 + y) * W + x1]; }
+    median_line(top, bw); median_line(bot, bw); median_line(lef, bh); median_line(rig, bh);
+
+    // Fondo calculado: mezcla de los cuatro bordes según la distancia
+    Px *fill = (Px *)malloc(sizeof(Px) * bw * bh);
+    for (int y = 0; y < bh; y++)
+        for (int x = 0; x < bw; x++) {
+            float wl = 1.0f / (x + 1), wr = 1.0f / (bw - x), wt = 1.0f / (y + 1), wb = 1.0f / (bh - y);
+            wl *= wl; wr *= wr; wt *= wt; wb *= wb;
+            float s = wl + wr + wt + wb;
+            Px a = lef[y], b = rig[y], c = top[x], d = bot[x];
+            fill[y * bw + x] = (Px){
+                (unsigned char)((a.r * wl + b.r * wr + c.r * wt + d.r * wb) / s),
+                (unsigned char)((a.g * wl + b.g * wr + c.g * wt + d.g * wb) / s),
+                (unsigned char)((a.b * wl + b.b * wr + c.b * wt + d.b * wb) / s), 255 };
+        }
+    free(top); free(bot); free(lef); free(rig);
+
+    int tol = (int)(14 + tolerance * 80);
+    // Cuánto es "dibujo" cada píxel (0..1)
+    float *alpha = (float *)calloc((size_t)bw * bh, sizeof(float));
+    int ax0 = bw, ay0 = bh, ax1 = -1, ay1 = -1;
+    double sr = 0, sg = 0, sb = 0, sw = 0;
+    for (int y = 0; y < bh; y++)
+        for (int x = 0; x < bw; x++) {
+            Px c = p[(y0 + y) * W + x0 + x];
+            if (c.a < 40) continue;
+            int dd = color_dist(c, fill[y * bw + x]);
+            float a = (dd - tol * 0.5f) / (tol * 0.5f);
+            if (a <= 0) continue;
+            if (a > 1) a = 1;
+            alpha[y * bw + x] = a;
+            if (a >= 1) {
+                if (x < ax0) ax0 = x;
+                if (x > ax1) ax1 = x;
+                if (y < ay0) ay0 = y;
+                if (y > ay1) ay1 = y;
+                double w = dd;
+                sr += c.r * w; sg += c.g * w; sb += c.b * w; sw += w;
+            }
+        }
+    if (ax1 < 0) { free(alpha); free(fill); UnloadImage(img); return 0; }
+    ax0 = ax0 > 1 ? ax0 - 2 : 0; ay0 = ay0 > 1 ? ay0 - 2 : 0;
+    ax1 = ax1 < bw - 2 ? ax1 + 2 : bw - 1; ay1 = ay1 < bh - 2 ? ay1 + 2 : bh - 1;
+    int pw = ax1 - ax0 + 1, ph = ay1 - ay0 + 1;
+    Px *out = (Px *)calloc((size_t)pw * ph, sizeof(Px));
+    for (int y = 0; y < ph; y++)
+        for (int x = 0; x < pw; x++) {
+            int i = (ay0 + y) * bw + ax0 + x;
+            Px c = p[(y0 + ay0 + y) * W + x0 + ax0 + x];
+            float a = alpha[i];
+            if (a <= 0) { Px f = fill[i]; out[y * pw + x] = (Px){ f.r, f.g, f.b, 0 }; continue; }
+            // Quitamos la parte de fondo que lleva mezclada el borde suave
+            Px f = fill[i];
+            Px o;
+            if (a < 1) {
+                o.r = (unsigned char)fminf(255, fmaxf(0, (c.r - f.r * (1 - a)) / a));
+                o.g = (unsigned char)fminf(255, fmaxf(0, (c.g - f.g * (1 - a)) / a));
+                o.b = (unsigned char)fminf(255, fmaxf(0, (c.b - f.b * (1 - a)) / a));
+            } else o = c;
+            o.a = (unsigned char)(a * c.a);
+            out[y * pw + x] = o;
+        }
+    // En la imagen original, lo separado se sustituye por el fondo calculado
+    unsigned char *m = (unsigned char *)calloc((size_t)bw * bh, 1);
+    for (int i = 0; i < bw * bh; i++) m[i] = alpha[i] > 0 ? 1 : 0;
+    unsigned char *grown = dilate(m, bw, bh, 2);
+    for (int y = 0; y < bh; y++)
+        for (int x = 0; x < bw; x++)
+            if (grown[y * bw + x]) p[(y0 + y) * W + x0 + x] = fill[y * bw + x];
+    free(grown); free(m); free(alpha); free(fill);
+
+    *part = (Image){ out, pw, ph, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+    *bx = x0 + ax0;
+    *by = y0 + ay0;
+    *rest = img;
+    if (mainColor) {
+        *mainColor = sw > 0 ? (Color){ (unsigned char)(sr / sw), (unsigned char)(sg / sw), (unsigned char)(sb / sw), 255 } : BLACK;
+    }
+    return 1;
+}

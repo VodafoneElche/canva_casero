@@ -43,6 +43,7 @@ typedef struct {
     int effect;            // TextEffect
     Color effectColor;
     float effectAmount;    // 0..1
+    float lineSpacing;     // distancia entre líneas / tamaño (0 = normal)
     int asset;             // índice de imagen (imágenes)
     bool tint;             // imagen de un solo color: se pinta con 'fill' (partes de SVG)
     bool visible;

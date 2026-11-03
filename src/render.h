@@ -29,6 +29,9 @@ int font_find(const char *name);       // -1 si no está
 int font_install_file(const char *path);                                 // .ttf / .otf del ordenador
 int font_install_data(const char *name, const char *ext, const unsigned char *data, int size);
 const char *fonts_user_dir(void);
+// Para pasar tamaños de PDF/Canva (em) al tamaño que usa el programa, y dónde queda la línea base
+float font_em_ratio(int index);       // alto de la letra / em
+float font_ascent_ratio(int index);   // línea base desde arriba / alto de la letra
 // Para las listas: carga como mucho 2 fuentes nuevas por fotograma (el resto, en los siguientes)
 Font font_get_preview(int index);
 void fonts_new_frame(void);

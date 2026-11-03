@@ -11,6 +11,12 @@
 // Devuelve 0 si ahí solo hay fondo, 1 si ha ido bien.
 int magic_extract(Image src, int px, int py, float tolerance, Image *part, int *bx, int *by, Image *rest);
 
+// Igual, pero dentro del recuadro (x0,y0)-(x1,y1): sirve para fondos con degradado o textura.
+// El hueco se rellena mezclando los colores del borde del recuadro. mainColor: color principal
+// de lo separado (por ejemplo, el de las letras). Devuelve 0 si en el recuadro no hay nada.
+int magic_extract_box(Image src, int x0, int y0, int x1, int y1, float tolerance,
+                      Image *part, int *bx, int *by, Image *rest, Color *mainColor);
+
 // Da a los píxeles transparentes del borde el color de sus vecinos (evita bordes oscuros al escalar)
 void image_bleed_edges(Image *img);
 

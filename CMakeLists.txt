@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(LienzoCasero VERSION 0.4.0 LANGUAGES C)
+project(LienzoCasero VERSION 0.5.0 LANGUAGES C)
 if(WIN32)
     enable_language(RC)
 endif()
@@ -36,7 +36,7 @@ set(SOURCES
     src/ui.c
     src/templates.c
     src/platform.c
-    src/svg.c src/magic.c
+    src/svg.c src/magic.c src/pdf.c
 )
 # nanosvg es código de otra persona: sin avisos
 set_source_files_properties(src/svg.c PROPERTIES COMPILE_OPTIONS "-w")
@@ -71,6 +71,9 @@ add_custom_command(TARGET LienzoCasero POST_BUILD
 option(LIENZO_TESTS "Compilar el modo de pruebas automáticas" OFF)
 if(LIENZO_TESTS)
     target_compile_definitions(LienzoCasero PRIVATE LIENZO_TESTS)
+    # Herramienta para ver qué piezas salen de un PDF
+    add_executable(pdfdump tests/pdfdump.c src/pdf.c src/magic.c src/svg.c)
+    target_link_libraries(pdfdump raylib)
 endif()
 
 install(TARGETS LienzoCasero RUNTIME DESTINATION .)
