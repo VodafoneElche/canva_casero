@@ -140,6 +140,14 @@ static void begin_change(void)
     A.dirty = true;
 }
 
+// Varios objetos seleccionados a la vez (arrastrando un recuadro, Mayús + clic o Ctrl + A).
+// Mientras hay varios, A.sel es -1 y la lista está aquí.
+static bool g_multi[MAX_ELEMENTS];
+static int g_multiN;
+static Element g_clipMany[MAX_ELEMENTS];   // varios copiados con Ctrl + C
+static int g_clipManyN;
+static void multi_clear(void) { memset(g_multi, 0, sizeof(g_multi)); g_multiN = 0; }
+
 static Element *selected(void)
 {
     if (A.sel < 0 || A.sel >= A.doc.count) return NULL;
@@ -171,11 +179,16 @@ static void ensure_ext(char *path, size_t cap, const char *ext)
     strncat(path, ext, cap - strlen(path) - 1);
 }
 
+// Filas de la barra de herramientas: si no cabe todo en una, pasa a dos (o tres)
+static int g_tbRows = 1;
+static float g_tbLeft, g_tbRight;
+static int g_tbRowsNow;
+
 static Rectangle canvas_rect(void)
 {
     float left = RAIL_W + (A.panelOpen ? PANEL_W : 0);
-    float top = TOPBAR_H + TOOLBAR_H;
-    return (Rectangle){ left, top, GetScreenWidth() - left, GetScreenHeight() - top - BOTTOM_H };
+    float top = TOPBAR_H + TOOLBAR_H * g_tbRows;
+    return (Rectangle){ left, top, ui_sw() - left, ui_sh() - top - BOTTOM_H };
 }
 
 static void fit_view(void)
@@ -209,11 +222,24 @@ static void select_index(int i)
 {
     if (i != A.sel) { stop_editing(); A.wand = false; A.fixText = false; A.boxDrag = false; }
     A.sel = i;
+    multi_clear();
+}
+
+// Deja seleccionados los objetos marcados en "on" (uno solo = selección normal)
+static void select_many(const bool *on)
+{
+    int n = 0, last = -1;
+    for (int i = 0; i < A.doc.count; i++) if (on[i]) { n++; last = i; }
+    if (n <= 1) { select_index(last); return; }
+    select_index(-1);
+    for (int i = 0; i < A.doc.count; i++) g_multi[i] = on[i];
+    g_multiN = n;
 }
 
 static void after_history_change(void)
 {
     stop_editing();
+    multi_clear();
     if (A.sel >= A.doc.count) A.sel = -1;
     A.dirty = true;
 }
@@ -223,6 +249,7 @@ static void new_document(int w, int h)
     history_clear();
     doc_init(&A.doc, w, h, WHITE);
     A.sel = -1;
+    multi_clear();
     A.path[0] = 0;
     A.dirty = false;
     stop_editing();
@@ -666,6 +693,12 @@ static void cmd_add_font(void)
 
 static void cmd_delete(void)
 {
+    if (g_multiN >= 2) {
+        begin_change();
+        for (int i = A.doc.count - 1; i >= 0; i--) if (g_multi[i] && !A.doc.el[i].locked) doc_remove(&A.doc, i);
+        select_index(-1);
+        return;
+    }
     Element *e = selected();
     if (!e) return;
     begin_change();
@@ -676,6 +709,21 @@ static void cmd_delete(void)
 
 static void cmd_duplicate(void)
 {
+    if (g_multiN >= 2) {
+        static bool on[MAX_ELEMENTS];
+        memset(on, 0, sizeof(on));
+        begin_change();
+        int n = A.doc.count;
+        for (int i = 0; i < n && A.doc.count < MAX_ELEMENTS; i++) {
+            if (!g_multi[i]) continue;
+            Element c = A.doc.el[i];
+            c.x += 30; c.y += 30; c.locked = false;
+            on[A.doc.count] = true;
+            A.doc.el[A.doc.count++] = c;
+        }
+        select_many(on);
+        return;
+    }
     if (!selected()) return;
     begin_change();
     select_index(doc_duplicate(&A.doc, A.sel));
@@ -701,6 +749,19 @@ static void cmd_paste(void)
         if (id >= 0) { add_image_asset(id, doc_center()); return; }
     }
 #endif
+    if (g_clipManyN > 0) {
+        static bool on[MAX_ELEMENTS];
+        memset(on, 0, sizeof(on));
+        begin_change();
+        for (int k = 0; k < g_clipManyN && A.doc.count < MAX_ELEMENTS; k++) {
+            g_clipMany[k].x += 30;
+            g_clipMany[k].y += 30;
+            on[A.doc.count] = true;
+            A.doc.el[A.doc.count++] = g_clipMany[k];
+        }
+        select_many(on);
+        return;
+    }
     if (A.hasClipboard && A.doc.count < MAX_ELEMENTS) {
         begin_change();
         A.clipboard.x += 30;
@@ -712,6 +773,14 @@ static void cmd_paste(void)
 
 static void cmd_copy(void)
 {
+    g_clipManyN = 0;
+    if (g_multiN >= 2) {
+        for (int i = 0; i < A.doc.count; i++)
+            if (g_multi[i]) { g_clipMany[g_clipManyN] = A.doc.el[i]; g_clipMany[g_clipManyN++].locked = false; }
+        A.hasClipboard = false;
+        SetClipboardText(" ");
+        return;
+    }
     Element *e = selected();
     if (!e) return;
     A.clipboard = *e;
@@ -887,6 +956,110 @@ static void apply_rotate(Element *e, Vector2 mouseWorld)
     while (a > 180) a -= 360;
     while (a <= -180) a += 360;
     e->rotation = a;
+}
+
+// ------------------------------------------------------------------ Varios objetos a la vez
+
+static Rectangle multi_bounds(void)
+{
+    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+    for (int i = 0; i < A.doc.count; i++) {
+        if (!g_multi[i]) continue;
+        Rectangle b = element_bounds(&A.doc.el[i]);
+        x0 = fminf(x0, b.x); y0 = fminf(y0, b.y);
+        x1 = fmaxf(x1, b.x + b.width); y1 = fmaxf(y1, b.y + b.height);
+    }
+    if (x1 < x0) return (Rectangle){ 0 };
+    return (Rectangle){ x0, y0, x1 - x0, y1 - y0 };
+}
+
+static void select_all(void)
+{
+    static bool on[MAX_ELEMENTS];
+    for (int i = 0; i < A.doc.count; i++) on[i] = A.doc.el[i].visible && !A.doc.el[i].locked;
+    select_many(on);
+    if (g_multiN >= 2) {
+        char m[80];
+        snprintf(m, sizeof(m), "%d objetos seleccionados", g_multiN);
+        toast(m);
+    }
+}
+
+// Mayús + clic: añade o quita un objeto de la selección
+static void toggle_in_selection(int hit)
+{
+    static bool on[MAX_ELEMENTS];
+    for (int i = 0; i < A.doc.count; i++) on[i] = g_multiN >= 2 ? g_multi[i] : i == A.sel;
+    on[hit] = !on[hit];
+    select_many(on);
+}
+
+static int g_groupDrag;          // 0 = nada, 1 = mover, 2 = cambiar el tamaño
+static int g_groupCorner;
+static Element g_groupOrig[MAX_ELEMENTS];
+static Rectangle g_groupBox0;
+static Vector2 g_groupStart, g_groupStartMouse;
+static bool g_groupPushed;
+static bool g_marquee;           // arrastrando un recuadro para elegir objetos
+static Vector2 g_mqStart, g_mqEnd;
+static int g_mqHit;
+
+static Vector2 box_corner(Rectangle b, int k)
+{
+    return (Vector2){ (k == 1 || k == 2) ? b.x + b.width : b.x, k >= 2 ? b.y + b.height : b.y };
+}
+
+static int group_corner_at(Vector2 screen)
+{
+    Rectangle b = multi_bounds();
+    for (int k = 0; k < 4; k++)
+        if (Vector2Distance(GetWorldToScreen2D(box_corner(b, k), A.cam), screen) <= 11) return k;
+    return -1;
+}
+
+static void group_begin(int mode, int corner, Vector2 w, Vector2 m)
+{
+    g_groupDrag = mode;
+    g_groupCorner = corner;
+    g_groupBox0 = multi_bounds();
+    g_groupStart = w;
+    g_groupStartMouse = m;
+    g_groupPushed = false;
+    for (int i = 0; i < A.doc.count; i++) g_groupOrig[i] = A.doc.el[i];
+}
+
+static void group_update(Vector2 w, Vector2 m)
+{
+    if (!g_groupPushed && Vector2Distance(m, g_groupStartMouse) > 2) { begin_change(); g_groupPushed = true; }
+    if (!g_groupPushed) return;
+    if (g_groupDrag == 1) {
+        Vector2 d = Vector2Subtract(w, g_groupStart);
+        for (int i = 0; i < A.doc.count; i++) {
+            if (!g_multi[i] || A.doc.el[i].locked) continue;
+            A.doc.el[i].x = g_groupOrig[i].x + d.x;
+            A.doc.el[i].y = g_groupOrig[i].y + d.y;
+        }
+        return;
+    }
+    // Esquina: todo crece o encoge a la vez, desde la esquina contraria
+    Vector2 anchor = box_corner(g_groupBox0, (g_groupCorner + 2) % 4);
+    Vector2 c0 = Vector2Subtract(box_corner(g_groupBox0, g_groupCorner), anchor);
+    Vector2 v = Vector2Subtract(w, anchor);
+    float dd = c0.x * c0.x + c0.y * c0.y;
+    float sc = dd > 0 ? (v.x * c0.x + v.y * c0.y) / dd : 1;
+    if (sc < 0.05f) sc = 0.05f;
+    for (int i = 0; i < A.doc.count; i++) {
+        if (!g_multi[i] || A.doc.el[i].locked) continue;
+        const Element *o = &g_groupOrig[i];
+        Element *e = &A.doc.el[i];
+        Vector2 c = Vector2Add(anchor, Vector2Scale(Vector2Subtract(el_center(o), anchor), sc));
+        e->w = o->w * sc;
+        e->h = o->h * sc;
+        e->strokeW = o->strokeW * sc;
+        if (e->type == EL_TEXT) { e->fontSize = fmaxf(4, o->fontSize * sc); fix_text_height(e); }
+        e->x = c.x - e->w / 2;
+        e->y = c.y - e->h / 2;
+    }
 }
 
 // Lápiz mágico: separa la parte tocada de la imagen seleccionada en una capa nueva
@@ -1999,6 +2172,59 @@ static void canvas_input(Rectangle cr)
             A.fixText = false;
         }
     }
+    // Recuadro para elegir varios objetos
+    if (g_marquee) {
+        g_mqEnd = w;
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+            g_marquee = false;
+            Vector2 a = GetWorldToScreen2D(g_mqStart, A.cam), b = GetWorldToScreen2D(g_mqEnd, A.cam);
+            if (fabsf(a.x - b.x) < 5 && fabsf(a.y - b.y) < 5) { select_index(g_mqHit); return; }
+            Rectangle r = { fminf(g_mqStart.x, g_mqEnd.x), fminf(g_mqStart.y, g_mqEnd.y), fabsf(g_mqStart.x - g_mqEnd.x), fabsf(g_mqStart.y - g_mqEnd.y) };
+            static bool on[MAX_ELEMENTS];
+            for (int i = 0; i < A.doc.count; i++) {
+                const Element *e = &A.doc.el[i];
+                on[i] = e->visible && !e->locked && CheckCollisionRecs(r, element_bounds(e));
+            }
+            select_many(on);
+        }
+        return;
+    }
+    // Mover o cambiar el tamaño de varios a la vez
+    if (g_groupDrag) {
+        group_update(w, m);
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_groupDrag = 0;
+        SetMouseCursor(g_groupCorner >= 0 ? MOUSE_CURSOR_RESIZE_NWSE : MOUSE_CURSOR_RESIZE_ALL);
+        return;
+    }
+    if (over && A.drag == DRAG_NONE && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !space && !A.editing) {
+        int hit = pick(w);
+        if (g_multiN >= 2) {
+            int k = group_corner_at(m);
+            if (k >= 0) { group_begin(2, k, w, m); return; }
+            if (shift_down() && hit >= 0) { toggle_in_selection(hit); return; }
+            bool inBox = CheckCollisionPointRec(w, multi_bounds());
+            if ((hit >= 0 && g_multi[hit]) || (inBox && (hit < 0 || A.doc.el[hit].locked))) { group_begin(1, -1, w, m); return; }
+        } else if (shift_down() && hit >= 0) {
+            toggle_in_selection(hit);
+            return;
+        }
+        // En un hueco (o encima de algo bloqueado, como un fondo): recuadro para elegir varios
+        bool onHandle = sel && !sel->locked && handle_at(sel, m) >= 0;
+        if (!onHandle && (hit < 0 || A.doc.el[hit].locked) && !(sel && hit == A.sel)) {
+            g_marquee = true;
+            g_mqStart = g_mqEnd = w;
+            g_mqHit = hit;
+            select_index(-1);
+            return;
+        }
+    }
+    if (g_multiN >= 2 && over) {
+        Rectangle gb = multi_bounds();
+        if (group_corner_at(m) >= 0) SetMouseCursor(MOUSE_CURSOR_RESIZE_NWSE);
+        else if (CheckCollisionPointRec(w, gb)) SetMouseCursor(MOUSE_CURSOR_RESIZE_ALL);
+        else SetMouseCursor(MOUSE_CURSOR_DEFAULT);
+        if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
+    }
     if (over && A.drag == DRAG_NONE && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !space) {
         if (sel && !sel->locked) {
             int h = handle_at(sel, m);
@@ -2203,6 +2429,7 @@ static void shortcuts(void)
     if (c && IsKeyPressed(KEY_S)) cmd_save(shift_down());
     if (c && IsKeyPressed(KEY_O)) cmd_open();
     if (c && IsKeyPressed(KEY_N)) A.modal = MODAL_NEW;
+    if (c && IsKeyPressed(KEY_A)) select_all();
     if (c && IsKeyPressed(KEY_D)) cmd_duplicate();
     if (c && IsKeyPressed(KEY_C)) cmd_copy();
     if (c && IsKeyPressed(KEY_X)) { cmd_copy(); cmd_delete(); }
@@ -2214,6 +2441,20 @@ static void shortcuts(void)
     if (c && (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT))) zoom_at((Vector2){ A.cam.offset.x, A.cam.offset.y }, 0.8f);
     if (c) return;
 
+    if (g_multiN >= 2) {
+        if (IsKeyPressed(KEY_ESCAPE)) { A.popup = POP_NONE; select_index(-1); return; }
+        if (IsKeyPressed(KEY_DELETE) || IsKeyPressed(KEY_BACKSPACE)) { cmd_delete(); return; }
+        float step = shift_down() ? 10 : 1;
+        int keys[4] = { KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN };
+        float dx[4] = { -step, step, 0, 0 }, dy[4] = { 0, 0, -step, step };
+        for (int k = 0; k < 4; k++) {
+            if (IsKeyPressed(keys[k])) begin_change();
+            if (key_hit(keys[k]))
+                for (int i = 0; i < A.doc.count; i++)
+                    if (g_multi[i] && !A.doc.el[i].locked) { A.doc.el[i].x += dx[k]; A.doc.el[i].y += dy[k]; }
+        }
+        return;
+    }
     Element *e = selected();
     if (IsKeyPressed(KEY_ESCAPE) && A.ocrMode && !A.editing) { A.ocrMode = false; return; }
     if (IsKeyPressed(KEY_ESCAPE)) { A.popup = POP_NONE; if (A.wand || A.fixText) { A.wand = false; A.fixText = false; A.boxDrag = false; } else select_index(-1); }
@@ -2259,7 +2500,7 @@ static void draw_element_outline(const Element *e, Color c, float thick)
 static void draw_canvas(Rectangle cr)
 {
     DrawRectangleRec(cr, COL_BG);
-    BeginScissorMode((int)cr.x, (int)cr.y, (int)cr.width, (int)cr.height);
+    ui_scissor(cr.x, cr.y, cr.width, cr.height);
 
     // Sombra de la hoja
     Vector2 p0 = GetWorldToScreen2D((Vector2){ 0, 0 }, A.cam);
@@ -2269,9 +2510,10 @@ static void draw_canvas(Rectangle cr)
         DrawRectangleRec((Rectangle){ page.x - i + 2, page.y - i + 4, page.width + 2 * i - 4, page.height + 2 * i - 4 }, (Color){ 30, 30, 60, 6 });
     if (A.doc.bg.a < 255) draw_checker(page, 16);
 
-    BeginMode2D(A.cam);
+    BeginMode2D(ui_camera(A.cam));
     render_document(&A.doc, true);
     EndMode2D();
+    ui_apply_scale();
 
     // Lo que se sale de la hoja se ve más claro (no saldrá al exportar)
     Color veil = { COL_BG.r, COL_BG.g, COL_BG.b, 215 };
@@ -2304,6 +2546,28 @@ static void draw_canvas(Rectangle cr)
         Rectangle br = { fminf(a.x, b.x), fminf(a.y, b.y), fabsf(a.x - b.x), fabsf(a.y - b.y) };
         DrawRectangleRec(br, (Color){ 109, 74, 255, 40 });
         DrawRectangleLinesEx(br, 2, COL_ACCENT);
+    }
+
+    if (g_marquee) {
+        Vector2 a = GetWorldToScreen2D(g_mqStart, A.cam), b = GetWorldToScreen2D(g_mqEnd, A.cam);
+        Rectangle br = { fminf(a.x, b.x), fminf(a.y, b.y), fabsf(a.x - b.x), fabsf(a.y - b.y) };
+        DrawRectangleRec(br, (Color){ 109, 74, 255, 30 });
+        DrawRectangleLinesEx(br, 1.5f, COL_ACCENT);
+        // Lo que va a quedar elegido
+        Rectangle r = { fminf(g_mqStart.x, g_mqEnd.x), fminf(g_mqStart.y, g_mqEnd.y), fabsf(g_mqStart.x - g_mqEnd.x), fabsf(g_mqStart.y - g_mqEnd.y) };
+        for (int i = 0; i < A.doc.count; i++) {
+            const Element *el = &A.doc.el[i];
+            if (el->visible && !el->locked && CheckCollisionRecs(r, element_bounds(el))) draw_element_outline(el, (Color){ 109, 74, 255, 170 }, 1.5f);
+        }
+    }
+    if (g_multiN >= 2) {
+        for (int i = 0; i < A.doc.count; i++) if (g_multi[i]) draw_element_outline(&A.doc.el[i], (Color){ 109, 74, 255, 150 }, 1.5f);
+        Rectangle gb = multi_bounds();
+        Vector2 a = GetWorldToScreen2D((Vector2){ gb.x, gb.y }, A.cam), b = GetWorldToScreen2D((Vector2){ gb.x + gb.width, gb.y + gb.height }, A.cam);
+        Rectangle sr = { a.x - 4, a.y - 4, b.x - a.x + 8, b.y - a.y + 8 };
+        DrawRectangleLinesEx(sr, 2, COL_ACCENT);
+        Vector2 cs[4] = { { sr.x, sr.y }, { sr.x + sr.width, sr.y }, { sr.x + sr.width, sr.y + sr.height }, { sr.x, sr.y + sr.height } };
+        for (int k = 0; k < 4; k++) { DrawCircleV(cs[k], 7, WHITE); DrawCircleLinesV(cs[k], 7, COL_ACCENT); }
     }
 
     Element *e = selected();
@@ -2403,8 +2667,8 @@ static void set_target_color(Color col)
 static Rectangle popup_place(Rectangle anchor, float w, float h)
 {
     float x = anchor.x, y = anchor.y + anchor.height + 6;
-    if (x + w > GetScreenWidth() - 8) x = GetScreenWidth() - 8 - w;
-    if (y + h > GetScreenHeight() - 8) y = anchor.y - h - 6;
+    if (x + w > ui_sw() - 8) x = ui_sw() - 8 - w;
+    if (y + h > ui_sh() - 8) y = anchor.y - h - 6;
     if (x < 8) x = 8;
     return (Rectangle){ x, y, w, h };
 }
@@ -2422,6 +2686,66 @@ static bool menu_item(Rectangle r, const char *label, const char *hint)
     ui_text(label, r.x + 12, r.y + (r.height - 18) / 2, 18, COL_TEXT);
     if (hint) ui_text(hint, r.x + r.width - 12 - ui_text_width(hint, 15), r.y + (r.height - 15) / 2, 15, COL_MUTED);
     return hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
+}
+
+// ------------------------------------------------------------------ Tamaño del programa
+
+static const float UI_SIZES[3] = { 1.0f, 1.25f, 1.5f };
+static const char *UI_SIZE_NAMES[3] = { "Normal", "Grande", "Muy grande" };
+static int g_uiSize = 1;   // por defecto, grande: se lee mejor
+
+static void settings_path(char *out, int max)
+{
+#ifdef _WIN32
+    snprintf(out, max, "%s\\ajustes.txt", plat_data_dir());
+#else
+    snprintf(out, max, "%s/ajustes.txt", plat_data_dir());
+#endif
+}
+
+// Si la ventana es pequeña, la lupa baja un poco para que quepa todo
+static void apply_ui_size(void)
+{
+    float s = UI_SIZES[g_uiSize];
+    float fit = fminf(GetScreenWidth() / 1100.0f, GetScreenHeight() / 620.0f);
+    if (s > fit) s = fmaxf(1.0f, fit);
+    if (fabsf(s - ui_scale()) < 0.01f) return;
+    ui_set_scale(s);
+    fonts_reload_ui((int)ceilf(20 * s));
+}
+
+static void load_settings(void)
+{
+    char p[1200];
+    settings_path(p, sizeof(p));
+    int size = 0;
+    unsigned char *d = plat_read_file(p, &size);
+    if (!d) return;
+    char buf[256] = { 0 };
+    memcpy(buf, d, size < 255 ? size : 255);
+    free(d);
+    int v;
+    const char *k = strstr(buf, "tamano ");
+    if (k && sscanf(k + 7, "%d", &v) == 1 && v >= 0 && v < 3) g_uiSize = v;
+}
+
+static void save_settings(void)
+{
+    char p[1200], buf[64];
+    settings_path(p, sizeof(p));
+    snprintf(buf, sizeof(buf), "tamano %d\n", g_uiSize);
+    plat_write_file(p, buf, (int)strlen(buf));
+}
+
+static void cmd_ui_size(void)
+{
+    g_uiSize = (g_uiSize + 1) % 3;
+    save_settings();
+    apply_ui_size();
+    fit_view();
+    char m[120];
+    snprintf(m, sizeof(m), "Tamaño del programa: %s", UI_SIZE_NAMES[g_uiSize]);
+    toast(m);
 }
 
 // ------------------------------------------------------------------ Actualizaciones
@@ -2473,7 +2797,7 @@ static void draw_popup(void)
     ui_set_layer(1);
     Rectangle r = { 0 };
     if (A.popup == POP_FILE) {
-        r = popup_place(A.popupAnchor, 300, 8 * 42 + 16);
+        r = popup_place(A.popupAnchor, 330, 9 * 42 + 16);
         popup_card(r);
         float y = r.y + 8;
         PopupId keep = POP_NONE;
@@ -2488,6 +2812,8 @@ static void draw_popup(void)
         if (menu_item((Rectangle){ r.x + 8, y, r.width - 16, 40 }, "Guardar como...", "Ctrl+Mayús+S")) { A.popup = POP_NONE; cmd_save(true); }
         y += 42;
         if (menu_item((Rectangle){ r.x + 8, y, r.width - 16, 40 }, "Guardar como plantilla...", NULL)) { A.modal = MODAL_SAVE_TEMPLATE; A.templateName[0] = 0; ui_focus_textbox(100); }
+        y += 42;
+        if (menu_item((Rectangle){ r.x + 8, y, r.width - 16, 40 }, "Tamaño de las letras", UI_SIZE_NAMES[g_uiSize])) { keep = POP_FILE; cmd_ui_size(); }
         y += 42;
         if (menu_item((Rectangle){ r.x + 8, y, r.width - 16, 40 }, "Buscar actualizaciones", "v" APP_VERSION)) { A.popup = POP_NONE; cmd_check_updates(); }
         y += 42;
@@ -2511,7 +2837,7 @@ static void draw_popup(void)
     } else if (A.popup == POP_FONT) {
         Element *e = selected();
         float rowH = 42;
-        float maxH = GetScreenHeight() - (A.popupAnchor.y + A.popupAnchor.height) - 24;
+        float maxH = ui_sh() - (A.popupAnchor.y + A.popupAnchor.height) - 24;
         float contentH = 0;
         int lastGroup = -1;
         for (int i = 0; i < g_fontCount; i++) {
@@ -2524,7 +2850,7 @@ static void draw_popup(void)
         if (CheckCollisionPointRec(GetMousePosition(), r)) A.fontScroll -= GetMouseWheelMove() * 60;
         A.fontScroll = Clamp(A.fontScroll, 0, fmaxf(0, contentH + 16 - h));
         ui_set_clip((Rectangle){ r.x, r.y + 6, r.width, r.height - 12 });
-        BeginScissorMode((int)r.x, (int)r.y + 6, (int)r.width, (int)r.height - 12);
+        ui_scissor(r.x, r.y + 6, r.width, r.height - 12);
         float y = r.y + 8 - A.fontScroll;
         lastGroup = -1;
         const char *groupNames[3] = { "De Windows", "Incluidas en el programa", "Mis fuentes" };
@@ -2664,7 +2990,7 @@ static void draw_modal(void)
 {
     if (A.modal == MODAL_NONE) return;
     ui_set_layer(1);
-    int sw = GetScreenWidth(), sh = GetScreenHeight();
+    int sw = ui_sw(), sh = ui_sh();
     DrawRectangle(0, 0, sw, sh, (Color){ 15, 15, 30, 120 });
     if (A.modal == MODAL_NEW) {
         Rectangle r = { sw / 2.0f - 330, sh / 2.0f - 300, 660, 600 };
@@ -2764,7 +3090,7 @@ static void draw_modal(void)
 
 static void draw_topbar(void)
 {
-    int sw = GetScreenWidth();
+    int sw = ui_sw();
     DrawRectangleGradientH(0, 0, sw, TOPBAR_H, COL_ACCENT2, COL_ACCENT);
     // Logotipo
     DrawRectangleRounded((Rectangle){ 16, 12, 32, 32 }, 0.35f, 8, WHITE);
@@ -2845,7 +3171,7 @@ static const char *PANEL_NAMES[PANEL_COUNT] = { "Diseño", "Plantillas", "Elemen
 
 static void draw_rail(void)
 {
-    int sh = GetScreenHeight();
+    int sh = ui_sh();
     DrawRectangle(0, TOPBAR_H, RAIL_W, sh - TOPBAR_H, COL_RAIL);
     for (int i = 0; i < PANEL_COUNT; i++) {
         Rectangle r = { 4, TOPBAR_H + 8 + i * 72.0f, RAIL_W - 8, 66 };
@@ -3133,7 +3459,7 @@ static float panel_clipart(float x, float y, float w)
         for (int i = first; i < last; i++) {
             int k = i - first;
             Rectangle cell = { x + (k % cols) * (cs + gap), y + (k / cols) * (cs + gap), cs, cs };
-            if (cell.y > GetScreenHeight() || cell.y + cell.height < TOPBAR_H) continue;
+            if (cell.y > ui_sh() || cell.y + cell.height < TOPBAR_H) continue;
             bool hover = ui_hover(cell);
             DrawRectangleRounded(cell, 0.18f, 6, hover ? COL_ACCENT_LT : COL_HOVER);
             Texture2D t = clip_thumb(i, &budget);
@@ -3186,7 +3512,7 @@ static float panel_text(float x, float y, float w)
         }
         Rectangle b = { x, y, w, 46 };
         y += 48;
-        if (b.y > GetScreenHeight() || b.y + b.height < TOPBAR_H) continue; // fuera de la vista
+        if (b.y > ui_sh() || b.y + b.height < TOPBAR_H) continue; // fuera de la vista
         bool hover = ui_hover(b);
         if (hover) DrawRectangleRounded(b, 0.2f, 6, COL_HOVER);
         DrawTextEx(font_get_preview(i), g_fonts[i].name, (Vector2){ b.x + 14, b.y + 9 }, 27, 0, COL_TEXT);
@@ -3307,7 +3633,7 @@ static float panel_layers(float x, float y, float w)
 static void draw_panel(void)
 {
     if (!A.panelOpen) return;
-    int sh = GetScreenHeight();
+    int sh = ui_sh();
     Rectangle pr = { RAIL_W, TOPBAR_H, PANEL_W, sh - TOPBAR_H };
     DrawRectangleRec(pr, COL_PANEL);
     DrawLine((int)(pr.x + pr.width), (int)pr.y, (int)(pr.x + pr.width), sh, COL_BORDER);
@@ -3321,7 +3647,7 @@ static void draw_panel(void)
     float maxScroll = fmaxf(0, A.panelContentH - content.height + 20);
     A.panelScroll = Clamp(A.panelScroll, 0, maxScroll);
 
-    BeginScissorMode((int)content.x, (int)content.y, (int)content.width, (int)content.height);
+    ui_scissor(content.x, content.y, content.width, content.height);
     ui_set_clip(content); // los clics fuera de la zona visible no cuentan
     float x = pr.x + 20, w = pr.width - 40;
     float y0 = content.y + 4 - A.panelScroll;
@@ -3360,6 +3686,15 @@ static float tb_label(const char *t, float x, float y)
     return x;
 }
 
+// Si lo siguiente (de ancho w) no cabe en esta fila, empieza otra debajo
+static void tb_fit(float *x, float *y, float w)
+{
+    if (*x + w <= g_tbRight || *x <= g_tbLeft + 1) return;
+    *x = g_tbLeft;
+    *y += TOOLBAR_H;
+    g_tbRowsNow++;
+}
+
 static float tb_slider(int id, const char *label, float x, float y, float w, float *field, float min, float max)
 {
     tb_label(label, x, y);
@@ -3372,19 +3707,54 @@ static float tb_slider(int id, const char *label, float x, float y, float w, flo
 
 static float tb_divider(float x, float y)
 {
+    if (x <= g_tbLeft + 1) return x;
     DrawLine((int)x, (int)y + 10, (int)x, (int)y + TOOLBAR_H - 10, COL_BORDER);
     return x + 14;
 }
 
+static void draw_toolbar_items(Element *e, Rectangle tb, float x, float y);
+
 static void draw_toolbar(void)
 {
     Rectangle cr = canvas_rect();
-    Rectangle tb = { cr.x, TOPBAR_H, cr.width, TOOLBAR_H };
+    Rectangle tb = { cr.x, TOPBAR_H, cr.width, (float)TOOLBAR_H * g_tbRows };
     DrawRectangleRec(tb, COL_PANEL);
     DrawLine((int)tb.x, (int)(tb.y + tb.height - 1), (int)(tb.x + tb.width), (int)(tb.y + tb.height - 1), COL_BORDER);
     float x = tb.x + 16, y = tb.y;
+    g_tbLeft = x;
+    g_tbRight = tb.x + tb.width - 16;
+    g_tbRowsNow = 1;
     Element *e = selected();
+    draw_toolbar_items(e, tb, x, y);
+    if (g_tbRowsNow != g_tbRows) { g_tbRows = g_tbRowsNow; }
+}
 
+static void draw_toolbar_items(Element *e, Rectangle tb, float x, float y)
+{
+
+    if (!e && g_multiN >= 2) {
+        char t[80];
+        snprintf(t, sizeof(t), "%d objetos seleccionados", g_multiN);
+        ui_text_bold(t, x, y + 18, 17, COL_TEXT);
+        x += ui_text_width(t, 17) + 20;
+        float need = 76 + 92 + 88 + 3 * 6;
+        const char *hint = "Arrástralos para moverlos; las esquinas cambian el tamaño.";
+        if (x + ui_text_width(hint, 15) + 20 + need <= g_tbRight) ui_text(hint, x, y + 19, 15, COL_MUTED);
+        else if (x + need > g_tbRight) { y += TOOLBAR_H; g_tbRowsNow++; }
+        float bx = tb.x + tb.width - 16;
+        bx -= 76;
+        if (ui_button((Rectangle){ bx, y + 10, 76, 36 }, "Borrar", BTN_DANGER)) cmd_delete();
+        bx -= 6 + 92;
+        if (ui_button((Rectangle){ bx, y + 10, 92, 36 }, "Bloquear", BTN_GHOST)) {
+            begin_change();
+            for (int i = 0; i < A.doc.count; i++) if (g_multi[i]) A.doc.el[i].locked = true;
+            select_index(-1);
+            toast("Bloqueados. Para soltar uno, púlsalo y elige \"Desbloquear\".");
+        }
+        bx -= 6 + 88;
+        if (ui_button((Rectangle){ bx, y + 10, 88, 36 }, "Duplicar", BTN_GHOST)) cmd_duplicate();
+        return;
+    }
     if (!e) {
         tb_label("Fondo", x, y);
         Rectangle sw = { x, y + 20, 30, 28 };
@@ -3395,9 +3765,11 @@ static void draw_toolbar(void)
         snprintf(s, sizeof(s), "Lienzo de %d × %d px", A.doc.w, A.doc.h);
         ui_text(s, x, y + 18, 17, COL_TEXT);
         x += ui_text_width(s, 17) + 14;
+        tb_fit(&x, &y, 150);
         if (ui_button((Rectangle){ x, y + 10, 150, 36 }, "Cambiar tamaño", BTN_NORMAL)) { A.panel = PANEL_DESIGN; A.panelOpen = true; A.panelScroll = 0; }
         x += 164;
-        ui_text("Elige algo en el panel de la izquierda para añadirlo.", x, y + 19, 15, COL_MUTED);
+        const char *hint = "Elige algo en el panel de la izquierda para añadirlo.";
+        if (x + ui_text_width(hint, 15) <= g_tbRight) ui_text(hint, x, y + 19, 15, COL_MUTED);
         return;
     }
 
@@ -3415,6 +3787,7 @@ static void draw_toolbar(void)
         x += 56;
     }
     if (shape || e->type == EL_IMAGE) {
+        tb_fit(&x, &y, 52 + 110);
         tb_label("Borde", x, y);
         Rectangle sw = { x, y + 20, 30, 28 };
         Color bc = e->strokeW > 0 ? e->stroke : BLANK;
@@ -3423,18 +3796,21 @@ static void draw_toolbar(void)
         x = tb_slider(1, "Grosor del borde", x, y, 110, &e->strokeW, 0, fmaxf(4, fminf(e->w, e->h) * 0.25f));
     }
     if (e->type == EL_LINE || e->type == EL_ARROW) {
+        tb_fit(&x, &y, 110);
         x = tb_slider(2, "Grosor", x, y, 110, &e->strokeW, 1, fmaxf(10, e->w * 0.15f));
         if (e->h < e->strokeW * 3) e->h = e->strokeW * 3;
     }
+    if (e->type == EL_RECT) tb_fit(&x, &y, 100);
     if (e->type == EL_RECT) x = tb_slider(3, "Esquinas", x, y, 100, &e->roundness, 0, 1);
 
     if (e->type == EL_TEXT) {
+        tb_fit(&x, &y, 14 + 180 + 124);
         x = tb_divider(x, y);
         Rectangle fb = { x, y + 10, 170, 36 };
         bool h = ui_hover(fb);
         DrawRectangleRounded(fb, 0.25f, 6, h ? COL_HOVER : WHITE);
         DrawRectangleRoundedLinesEx(fb, 0.25f, 6, 1, COL_BORDER);
-        BeginScissorMode((int)fb.x, (int)fb.y, (int)fb.width - 26, (int)fb.height);
+        ui_scissor(fb.x, fb.y, fb.width - 26, fb.height);
         DrawTextEx(font_get(e->font), font_name(e->font), (Vector2){ fb.x + 10, fb.y + 8 }, 19, 0, COL_TEXT);
         EndScissorMode();
         DrawTriangle((Vector2){ fb.x + fb.width - 20, fb.y + 15 }, (Vector2){ fb.x + fb.width - 15, fb.y + 21 }, (Vector2){ fb.x + fb.width - 10, fb.y + 15 }, COL_MUTED);
@@ -3447,6 +3823,7 @@ static void draw_toolbar(void)
         ui_text_center(sz, (Rectangle){ x + 32, y + 10, 48, 36 }, 18, COL_TEXT);
         if (ui_button((Rectangle){ x + 80, y + 10, 32, 36 }, "+", BTN_NORMAL)) { begin_change(); e->fontSize = fminf(1000, roundf(e->fontSize * 1.1f + 1)); fix_text_height(e); }
         x += 124;
+        tb_fit(&x, &y, 96 + 170);
         Rectangle fxb = { x, y + 10, 86, 36 };
         bool fxOn = e->effect != FX_NONE;
         if (fxOn) DrawRectangleRounded(fxb, 0.25f, 6, COL_ACCENT_LT);
@@ -3464,13 +3841,16 @@ static void draw_toolbar(void)
             x += aw[i] + 2;
         }
         x += 10;
+        tb_fit(&x, &y, 96);
         float ls0 = e->letterSpacing;
         x = tb_slider(6, "Espacio letras", x, y, 96, &e->letterSpacing, -0.05f, 0.6f);
         if (e->letterSpacing != ls0) fix_text_height(e);
     }
+    tb_fit(&x, &y, 14 + 110);
     x = tb_divider(x, y);
     x = tb_slider(4, "Transparencia", x, y, 110, &e->opacity, 0.05f, 1);
     if (e->type == EL_IMAGE && !e->locked) {
+        tb_fit(&x, &y, 14 + 140);
         x = tb_divider(x, y);
         Rectangle wb = { x, y + 10, 140, 36 };
         if (ui_button(wb, A.wand ? "Terminar" : "Lápiz mágico", A.wand ? BTN_PRIMARY : BTN_NORMAL)) {
@@ -3479,6 +3859,7 @@ static void draw_toolbar(void)
             if (A.wand) toast("Toca un dibujo, o rodéalo arrastrando, para separarlo del fondo");
         }
         x += 150;
+        tb_fit(&x, &y, 210);
         Rectangle fb2 = { x, y + 10, 210, 36 };
         bool ocrOn = A.ocrMode && A.ocrElem == A.sel;
         if (ui_button(fb2, ocrOn ? "Terminar" : "Editar textos de la imagen", ocrOn ? BTN_PRIMARY : BTN_NORMAL)) {
@@ -3493,13 +3874,16 @@ static void draw_toolbar(void)
         }
         x += 224;
         if (A.wand || A.fixText) {
+            tb_fit(&x, &y, 124);
             tb_label("Parecido al fondo", x, y);
             ui_slider(5, (Rectangle){ x + 4, y + 30, 120 - 8, 12 }, &A.wandTol, 0, 1);
             x += 134;
         }
     }
 
-    // Botones de la derecha
+    // Botones de la derecha: si no caben al lado, en una fila nueva
+    float need = 76 + (e->locked ? 118 : 92) + 88 + 72 + 80 + 5 * 6;
+    if (x + need > g_tbRight) { x = g_tbLeft; y += TOOLBAR_H; g_tbRowsNow++; }
     float bx = tb.x + tb.width - 16;
     struct { const char *label; int id; float w; } btns[] = {
         { "Borrar", 0, 76 }, { e->locked ? "Desbloquear" : "Bloquear", 1, e->locked ? 118 : 92 },
@@ -3540,10 +3924,14 @@ static void draw_bottombar(void)
         char t[120];
         snprintf(t, sizeof(t), "Bajando la versión %s...", update_version());
         ui_text_bold(t, bb.x + 16, bb.y + 11, 14, COL_ACCENT);
-    } else
-    ui_text("Rueda: mover  ·  Ctrl + rueda: zoom  ·  Botón derecho o Espacio: arrastrar la vista  ·  Doble clic: escribir", bb.x + 16, bb.y + 11, 14, COL_MUTED);
+    }
     float x = bb.x + bb.width - 16 - 300;
-    if (x < bb.x + 560) return;
+    if (us != UPD_AVAILABLE && us != UPD_FAILED && us != UPD_READY && us != UPD_DOWNLOADING) {
+        const char *hint = "Rueda: mover  ·  Ctrl + rueda: zoom  ·  Botón derecho o Espacio: arrastrar la vista  ·  Doble clic: escribir";
+        if (ui_text_width(hint, 14) > x - bb.x - 32) hint = "Rueda: mover  ·  Ctrl + rueda: zoom  ·  Doble clic: escribir";
+        ui_text_fit(hint, bb.x + 16, bb.y + 11, x - bb.x - 32, 14, COL_MUTED);
+    }
+    if (x < bb.x + 200) return;
     if (ui_button((Rectangle){ x, bb.y + 5, 30, 30 }, "-", BTN_GHOST)) zoom_at(A.cam.offset, 0.8f);
     float z = logf(A.cam.zoom);
     int r = ui_slider(10, (Rectangle){ x + 40, bb.y + 14, 120, 12 }, &z, logf(0.05f), logf(8));
@@ -3562,7 +3950,7 @@ static void draw_toast(void)
 {
     if (GetTime() > A.toastUntil) return;
     float tw = ui_text_width(A.toast, 17);
-    Rectangle r = { (GetScreenWidth() - tw) / 2 - 22, GetScreenHeight() - BOTTOM_H - 64.0f, tw + 44, 42 };
+    Rectangle r = { (ui_sw() - tw) / 2 - 22, ui_sh() - BOTTOM_H - 64.0f, tw + 44, 42 };
     DrawRectangleRounded(r, 0.5f, 8, (Color){ 24, 25, 38, 235 });
     ui_text(A.toast, r.x + 22, r.y + 11, 17, WHITE);
 }
@@ -3832,7 +4220,15 @@ int main(int argc, char **argv)
     MaximizeWindow();
 #endif
 
+    if (getenv("LIENZO_VENTANA")) {   // para pruebas: tamaño de ventana "1366x768"
+        int vw = 0, vh = 0;
+        if (sscanf(getenv("LIENZO_VENTANA"), "%dx%d", &vw, &vh) == 2) { SetWindowMinSize(800, 500); SetWindowSize(vw, vh); }
+    }
     fonts_load();
+    load_settings();
+    if (getenv("LIENZO_TEST")) g_uiSize = 0;   // las pruebas usan posiciones fijas
+    if (getenv("LIENZO_TAMANO")) g_uiSize = atoi(getenv("LIENZO_TAMANO")) % 3;
+    apply_ui_size();
     templates_install_defaults();
     templates_refresh();
 
@@ -3844,7 +4240,10 @@ int main(int argc, char **argv)
     strcpy(A.customW, "1080");
     strcpy(A.customH, "1080");
     new_document(1080, 1080);
-    if (argc > 1 && plat_file_exists(argv[1])) open_path(argv[1]);
+    if (argc > 1 && plat_file_exists(argv[1])) {
+        open_path(argv[1]);
+        if (getenv("LIENZO_SEL")) select_index(atoi(getenv("LIENZO_SEL")));   // para pruebas
+    }
     else toast("¡Hola! Elige una plantilla o empieza con el lienzo en blanco");
 
 #if defined(LIENZO_TESTS)
@@ -3859,6 +4258,7 @@ int main(int argc, char **argv)
     bool firstFrame = true;
     while (!A.quit) {
         update_tick();
+        if (IsWindowResized()) apply_ui_size();
 #if defined(LIENZO_TESTS)
         if (testDir) test_step(testDir, frame++);
 #endif
@@ -3900,6 +4300,7 @@ int main(int argc, char **argv)
         canvas_input(cr);
 
         BeginDrawing();
+        ui_apply_scale();
         ClearBackground(COL_BG);
         draw_canvas(cr);
         draw_toolbar();

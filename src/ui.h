@@ -54,4 +54,14 @@ void ui_focus_textbox(int id);
 
 void ui_shadow(Rectangle r, float radius);
 
+// Tamaño de todo el programa (menús, botones, letras): 1 = normal, 1.25 = grande...
+// Se dibuja todo con una lupa; el ratón y el tamaño de pantalla van en esa escala.
+void ui_set_scale(float s);
+float ui_scale(void);
+int ui_sw(void);                    // ancho de la ventana en la escala del programa
+int ui_sh(void);
+void ui_apply_scale(void);          // tras BeginDrawing / EndMode2D
+void ui_scissor(float x, float y, float w, float h);
+Camera2D ui_camera(Camera2D cam);   // la cámara del lienzo con la lupa ya puesta
+
 #endif

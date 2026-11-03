@@ -1,6 +1,8 @@
 #include "ui.h"
 #include "render.h"
 
+#include "rlgl.h"
+
 #include <math.h>
 #include <string.h>
 
@@ -13,6 +15,28 @@ static int g_focusBox = -1;
 static int g_focusRequest = -1;
 static Rectangle g_clip;
 static bool g_hasClip = false;
+static float g_scale = 1;
+
+void ui_set_scale(float s)
+{
+    g_scale = s < 0.5f ? 0.5f : s > 3 ? 3 : s;
+    SetMouseScale(1 / g_scale, 1 / g_scale);
+}
+float ui_scale(void) { return g_scale; }
+int ui_sw(void) { return (int)(GetScreenWidth() / g_scale); }
+int ui_sh(void) { return (int)(GetScreenHeight() / g_scale); }
+void ui_apply_scale(void) { if (g_scale != 1) rlScalef(g_scale, g_scale, 1); }
+void ui_scissor(float x, float y, float w, float h)
+{
+    BeginScissorMode((int)floorf(x * g_scale), (int)floorf(y * g_scale), (int)ceilf(w * g_scale), (int)ceilf(h * g_scale));
+}
+Camera2D ui_camera(Camera2D cam)
+{
+    cam.offset.x *= g_scale;
+    cam.offset.y *= g_scale;
+    cam.zoom *= g_scale;
+    return cam;
+}
 
 void ui_set_clip(Rectangle r) { g_clip = r; g_hasClip = true; }
 void ui_clear_clip(void) { g_hasClip = false; }
@@ -229,7 +253,7 @@ bool ui_textbox(int id, Rectangle r, char *buf, int max, bool *submitted)
     DrawRectangleRounded(r, 0.25f, 6, WHITE);
     DrawRectangleRoundedLinesEx(r, 0.25f, 6, focused ? 2 : 1, focused ? COL_ACCENT : COL_BORDER);
     float ty = r.y + (r.height - 18) / 2;
-    BeginScissorMode((int)r.x + 4, (int)r.y, (int)r.width - 8, (int)r.height);
+    ui_scissor(r.x + 4, r.y, r.width - 8, r.height);
     float tw = ui_text_width(buf, 18);
     float off = tw > r.width - 24 ? tw - (r.width - 24) : 0;
     ui_text(buf, r.x + 10 - off, ty, 18, COL_TEXT);

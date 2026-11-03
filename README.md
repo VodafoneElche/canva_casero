@@ -45,7 +45,7 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 
 1. Descarga el instalador de la última versión en
    [Releases](https://github.com/VodafoneElche/canva_casero/releases/latest).
-2. Ejecuta `LienzoCasero-0.9.1-instalador.exe`.
+2. Ejecuta `LienzoCasero-0.10.0-instalador.exe`.
 3. Windows puede avisar con "Windows protegió su PC" porque el programa no está firmado:
    pulsa **Más información** y luego **Ejecutar de todas formas**.
 
@@ -61,6 +61,11 @@ Para publicar una versión nueva: subir el número en `CMakeLists.txt` (y en `as
 e `installer/lienzo-casero.nsi`) y unir los cambios a `main`. GitHub Actions compila el
 instalador y, si esa versión aún no está en Releases, la publica sola.
 
+## Tamaño de las letras
+
+En *Archivo > Tamaño de las letras* se elige **Normal**, **Grande** (el de serie) o **Muy grande**.
+Agranda todo el programa: menús, botones y textos. Si la pantalla es pequeña, se ajusta para que quepa.
+
 ## Atajos de teclado
 
 | Atajo | Qué hace |
@@ -71,6 +76,9 @@ instalador y, si esa versión aún no está en Releases, la publica sola.
 | Ctrl+C / Ctrl+V / Ctrl+X | Copiar / pegar / cortar |
 | Ctrl+D | Duplicar |
 | Supr | Borrar lo seleccionado |
+| Arrastrar en un hueco del lienzo | Elegir varios objetos a la vez (los que toque el recuadro) |
+| Mayús + clic | Añadir o quitar un objeto de la selección |
+| Ctrl+A | Elegir todos los objetos (menos los bloqueados) |
 | Flechas (con Mayús. de 10 en 10) | Mover lo seleccionado |
 | Ctrl+E / Ctrl+P | Exportar PNG / PDF |
 | Ctrl+0 | Ajustar el lienzo a la ventana |
