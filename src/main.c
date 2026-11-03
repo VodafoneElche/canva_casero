@@ -806,7 +806,7 @@ static void wand_at(int index, Vector2 w)
     UnloadImage(src);
     if (!ok) { toast("Ahí solo hay fondo. Toca encima de un dibujo o de un texto."); return; }
     int partId = asset_add_image(part), restId = asset_add_image(rest);
-    if (partId >= 0) g_assets[partId].hidden = true;
+    // La parte separada sale en "Imágenes usadas" (para volver a ponerla); el resto no
     if (restId >= 0) g_assets[restId].hidden = true;
     float sx = e->w / (float)rest.width, sy = e->h / (float)rest.height;
     UnloadImage(part);
@@ -865,7 +865,6 @@ static void wand_box(int index, bool asText)
     int restId = asset_add_image(rest);
     int partId = asText ? -1 : asset_add_image(part);
     if (restId >= 0) g_assets[restId].hidden = true;
-    if (partId >= 0) g_assets[partId].hidden = true;
     UnloadImage(part);
     UnloadImage(rest);
     if (restId < 0 || (!asText && partId < 0)) { toast("No caben más imágenes en este diseño"); return; }
@@ -918,6 +917,25 @@ static void wand_box(int index, bool asText)
 
 typedef struct { float x, y, w, h; char text[400]; } OcrLine;
 
+// Una "palabra" de un solo signo que no es número ni una palabra de una letra (a, e, o, u, y)
+static bool ocr_junk(const char *t)
+{
+    int cp = 0, bytes = 0;
+    // Solo rayas, puntos u otros signos (por ejemplo "————" de una línea dibujada)
+    bool letters = false;
+    for (const char *q = t; *q;) {
+        int b = 0, c = GetCodepoint(q, &b);
+        q += b > 0 ? b : 1;
+        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= 0xC0 && c <= 0x24F && c != 0xD7 && c != 0xF7)) { letters = true; break; }
+    }
+    if (!letters) return true;
+    cp = GetCodepoint(t, &bytes);
+    if (t[bytes] != 0) return false;
+    if (cp >= '0' && cp <= '9') return false;
+    if (cp < 128 && strchr("aeouyAEOUY", cp)) return false;
+    return true;
+}
+
 static int run_ocr(Image src, int x0, int y0, int x1, int y1, OcrLine *lines, int max)
 {
     if (x0 < 0) x0 = 0;
@@ -953,28 +971,55 @@ static int run_ocr(Image src, int x0, int y0, int x1, int y1, OcrLine *lines, in
     bool ok = plat_ocr(path, out, sizeof(out));
     plat_delete_file(path);
     if (!ok) return 0;
-    int n = 0;
-    for (char *l = out; *l && n < max;) {
+    // Una fila por palabra: "renglón x y ancho alto<TAB>palabra"
+    typedef struct { int line, x, y, w, h; char t[120]; } OcrWord;
+    static OcrWord words[1500];
+    int nw = 0;
+    for (char *l = out; *l && nw < 1500;) {
         char *nl = strchr(l, '\n');
         if (nl) *nl = 0;
-        int lx, ly, lw, lh;
+        OcrWord wd;
         char *tab = strchr(l, '\t');
-        if (tab && sscanf(l, "%d %d %d %d", &lx, &ly, &lw, &lh) == 4 && lw > 0 && lh > 0) {
+        if (tab && sscanf(l, "%d %d %d %d %d", &wd.line, &wd.x, &wd.y, &wd.w, &wd.h) == 5 && wd.w > 0 && wd.h > 0) {
             char *t = tab + 1;
             while (*t == ' ') t++;
             int len = (int)strlen(t);
             while (len > 0 && (t[len - 1] == ' ' || t[len - 1] == '\r')) t[--len] = 0;
             if (len > 0) {
-                lines[n].x = x0 + lx / up;
-                lines[n].y = y0 + ly / up;
-                lines[n].w = lw / up;
-                lines[n].h = lh / up;
-                snprintf(lines[n].text, sizeof(lines[n].text), "%s", t);
-                n++;
+                snprintf(wd.t, sizeof(wd.t), "%s", t);
+                words[nw++] = wd;
             }
         }
         if (!nl) break;
         l = nl + 1;
+    }
+    int n = 0;
+    for (int i = 0; i < nw && n < max;) {
+        int j = i;
+        while (j < nw && words[j].line == words[i].line) j++;
+        // Fuera las marcas sueltas al principio o al final del renglón (trocitos de un dibujo
+        // o de un círculo que el lector confunde con una letra)
+        int a0 = i, a1 = j;
+        while (a0 < a1 && ocr_junk(words[a0].t)) a0++;
+        while (a1 > a0 && ocr_junk(words[a1 - 1].t)) a1--;
+        if (a1 > a0) {
+            int bx0 = 1 << 30, by0 = 1 << 30, bx1 = -(1 << 30), by1 = -(1 << 30);
+            lines[n].text[0] = 0;
+            for (int k = a0; k < a1; k++) {
+                if (words[k].x < bx0) bx0 = words[k].x;
+                if (words[k].y < by0) by0 = words[k].y;
+                if (words[k].x + words[k].w > bx1) bx1 = words[k].x + words[k].w;
+                if (words[k].y + words[k].h > by1) by1 = words[k].y + words[k].h;
+                if (k > a0) strncat(lines[n].text, " ", sizeof(lines[n].text) - strlen(lines[n].text) - 1);
+                strncat(lines[n].text, words[k].t, sizeof(lines[n].text) - strlen(lines[n].text) - 1);
+            }
+            lines[n].x = x0 + bx0 / up;
+            lines[n].y = y0 + by0 / up;
+            lines[n].w = (bx1 - bx0) / up;
+            lines[n].h = (by1 - by0) / up;
+            n++;
+        }
+        i = j;
     }
     return n;
 }
@@ -982,27 +1027,160 @@ static int run_ocr(Image src, int x0, int y0, int x1, int y1, OcrLine *lines, in
 // Busca entre nuestras fuentes la que dibuja ese texto con una forma más parecida a la de la
 // imagen. mask: transparencia de las letras recortadas (mw x mh). Devuelve la fuente, y en
 // size / topOff el tamaño y lo que queda por encima de las letras.
-static int match_font_shape(const char *text, const unsigned char *mask, int mw, int mh, float *size, float *topOff)
+// Rasgos de la forma de un texto, que no dependen de que cada letra caiga en el mismo sitio:
+// cuánta tinta hay en cada altura (dónde quedan las minúsculas, mayúsculas y remates) y lo
+// largos que son los trazos en horizontal y en vertical (grosor de palos, contraste, serifas)
+#define FEAT_H 48
+#define FEAT_ROWS 24
+#define FEAT_RUNS 16
+#define FEAT_CH 8
+#define FEAT_CW 160
+typedef struct { float aspect, ink; float rows[FEAT_ROWS]; float hr[FEAT_RUNS], vr[FEAT_RUNS]; float coarse[FEAT_CH * FEAT_CW]; } ShapeFeat;
+
+static void shape_features(const float *orig, int ow, int sh, int cw, ShapeFeat *f)
+{
+    memset(f, 0, sizeof(*f));
+    // Quitamos las columnas vacías (huecos entre letras y palabras): así un texto con las
+    // letras muy separadas se compara igual que uno con las letras juntas
+    float *src = (float *)malloc(sizeof(float) * ow * sh);
+    int sw = 0;
+    for (int x = 0; x < ow; x++) {
+        float mx = 0;
+        for (int y = 0; y < sh; y++) mx = fmaxf(mx, orig[y * ow + x]);
+        if (mx < 0.25f) continue;
+        for (int y = 0; y < sh; y++) src[y * ow + sw] = orig[y * ow + x];
+        sw++;
+    }
+    if (sw < 2) { free(src); return; }
+    // (src sigue teniendo filas de ow de ancho; copiamos a filas de sw)
+    for (int y = 1; y < sh; y++) memmove(src + y * sw, src + y * ow, sizeof(float) * sw);
+    f->aspect = (float)sw / sh;
+    int H = FEAT_H, W = (int)(FEAT_H * f->aspect + 0.5f);
+    if (W < 4) W = 4;
+    if (W > 2400) W = 2400;
+    float *g = (float *)calloc((size_t)W * H, sizeof(float));
+    float *cnt = (float *)calloc((size_t)W * H, sizeof(float));
+    // Reducir por medias (o ampliar repitiendo) a FEAT_H de alto
+    for (int y = 0; y < sh; y++)
+        for (int x = 0; x < sw; x++) {
+            int gi = (y * H / sh) * W + x * W / sw;
+            g[gi] += src[y * sw + x];
+            cnt[gi] += 1;
+        }
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            int i = y * W + x;
+            if (cnt[i] > 0) g[i] /= cnt[i];
+            else {
+                int sx = x * sw / W, sy = y * sh / H;
+                g[i] = src[sy * sw + sx];
+            }
+        }
+    free(cnt);
+    float total = 0;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            total += g[y * W + x];
+            f->rows[y * FEAT_ROWS / H] += g[y * W + x];
+        }
+    f->ink = total / ((float)W * H);
+    for (int i = 0; i < FEAT_ROWS; i++) f->rows[i] /= total > 0 ? total : 1;
+    // Trazos: tramos seguidos de tinta (más de la mitad) por filas y por columnas
+    float hs = 0, vs = 0;
+    for (int y = 0; y < H; y++) {
+        int run = 0;
+        for (int x = 0; x <= W; x++) {
+            if (x < W && g[y * W + x] > 0.5f) run++;
+            else if (run) { int b = run < FEAT_RUNS ? run : FEAT_RUNS - 1; f->hr[b] += run; hs += run; run = 0; }
+        }
+    }
+    for (int x = 0; x < W; x++) {
+        int run = 0;
+        for (int y = 0; y <= H; y++) {
+            if (y < H && g[y * W + x] > 0.5f) run++;
+            else if (run) { int b = run < FEAT_RUNS ? run : FEAT_RUNS - 1; f->vr[b] += run; vs += run; run = 0; }
+        }
+    }
+    for (int i = 0; i < FEAT_RUNS; i++) { f->hr[i] /= hs > 0 ? hs : 1; f->vr[i] /= vs > 0 ? vs : 1; }
+    // Rejilla gruesa (unas pocas celdas por letra) estirada a la caja del texto: dónde hay
+    // letras altas, bajas, huecos entre palabras... sin exigir que cada trazo coincida
+    {
+        float cc[FEAT_CH * FEAT_CW] = { 0 }, cn[FEAT_CH * FEAT_CW] = { 0 };
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                int ci = (y * FEAT_CH / H) * FEAT_CW + x * cw / W;
+                cc[ci] += g[y * W + x];
+                cn[ci] += 1;
+            }
+        for (int i = 0; i < FEAT_CH * FEAT_CW; i++) f->coarse[i] = cn[i] > 0 ? cc[i] / cn[i] : 0;
+    }
+    free(g);
+    free(src);
+}
+
+// Parecido de dos histogramas (1 = iguales); se suaviza un poco para tolerar un píxel de diferencia
+static float hist_match(const float *a, const float *b, int n)
+{
+    float s = 0;
+    for (int i = 0; i < n; i++) {
+        float aa = a[i] * 0.5f + (i > 0 ? a[i - 1] : 0) * 0.25f + (i < n - 1 ? a[i + 1] : 0) * 0.25f;
+        float bb = b[i] * 0.5f + (i > 0 ? b[i - 1] : 0) * 0.25f + (i < n - 1 ? b[i + 1] : 0) * 0.25f;
+        s += fminf(aa, bb);
+    }
+    return s;
+}
+
+static float shape_similarity(const ShapeFeat *a, const ShapeFeat *b, float *parts)
+{
+    float ar = fminf(a->aspect, b->aspect) / fmaxf(a->aspect, b->aspect);
+    float ink = (a->ink > 0 && b->ink > 0) ? fminf(a->ink, b->ink) / fmaxf(a->ink, b->ink) : 0;
+    float rows = hist_match(a->rows, b->rows, FEAT_ROWS);
+    float hr = hist_match(a->hr, b->hr, FEAT_RUNS), vr = hist_match(a->vr, b->vr, FEAT_RUNS);
+    float inter = 0, uni = 0;
+    for (int i = 0; i < FEAT_CH * FEAT_CW; i++) { inter += fminf(a->coarse[i], b->coarse[i]); uni += fmaxf(a->coarse[i], b->coarse[i]); }
+    float layout = uni > 0 ? inter / uni : 0;
+    if (parts) { parts[0] = ar; parts[1] = ink; parts[2] = rows; parts[3] = hr; parts[4] = vr; parts[5] = layout; }
+    return ar * 0.2f + ink * 0.1f + rows * 0.15f + hr * 0.15f + vr * 0.15f + layout * 0.25f;
+}
+
+// Elige la fuente que, escribiendo el mismo texto, deja una forma más parecida a la de la imagen
+static int match_font_shape(const char *text, const unsigned char *mask, int mw, int mh, float *size, float *topOff, float *inkW)
 {
     int best = 0;
     float bestScore = -1;
     *size = mh / 0.75f;
     *topOff = 0;
-    // Máscaras reducidas a una rejilla (media de cada celda) para comparar rápido
-    const int GW = 96, GH = 24;
-    float target[96 * 24] = { 0 };
-    float tInk = 0;
-    for (int y = 0; y < mh; y++)
-        for (int x = 0; x < mw; x++) target[(y * GH / mh) * GW + x * GW / mw] += mask[y * mw + x] / 255.0f;
-    {
-        float cellArea = ((float)mw / GW) * ((float)mh / GH);
-        for (int i = 0; i < GW * GH; i++) { target[i] = fminf(1, target[i] / cellArea); tInk += target[i]; }
-        tInk /= GW * GH;
+    // ¿Está casi todo en mayúsculas?
+    int upper = 0, lower = 0;
+    for (const char *q = text; *q;) {
+        int bytes = 0, cp = GetCodepoint(q, &bytes);
+        q += bytes > 0 ? bytes : 1;
+        if ((cp >= 'A' && cp <= 'Z') || (cp >= 0xC0 && cp <= 0xDE)) upper++;
+        else if ((cp >= 'a' && cp <= 'z') || (cp >= 0xDF && cp <= 0xFF)) lower++;
     }
-    float targetAspect = (float)mw / mh;
+    bool caps = upper > 0 && upper >= 4 * lower;
+    float *src = (float *)malloc(sizeof(float) * mw * mh);
+    for (int i = 0; i < mw * mh; i++) src[i] = mask[i] / 255.0f;
+    ShapeFeat target, cf;
+    // Rejilla gruesa: unas dos celdas por cada letra de alto
+    shape_features(src, mw, mh, FEAT_CW, &target);
+    int cw = (int)(target.aspect * FEAT_CH * 0.35f + 0.5f);
+    if (cw < 2) cw = 2;
+    if (cw > FEAT_CW) cw = FEAT_CW;
+    shape_features(src, mw, mh, cw, &target);
+    free(src);
+#if defined(LIENZO_TESTS)
+    if (getenv("LIENZO_DEBUG_FONTS")) {
+        Image dm = GenImageColor(mw, mh, BLACK);
+        for (int y = 0; y < mh; y++) for (int x = 0; x < mw; x++) { unsigned char v = mask[y * mw + x]; ImageDrawPixel(&dm, x, y, (Color){ v, v, v, 255 }); }
+        ExportImage(dm, "debug_mascara.png");
+        UnloadImage(dm);
+    }
+#endif
     for (int fi = 0; fi < g_fontCount; fi++) {
         Font f = font_get(fi);
         if (f.texture.id == 0 || g_fonts[fi].failed) continue;
+        // Del mismo alto que en la imagen, para que el grosor de los trazos se compare bien
         const float S = 100;
         Image im = ImageTextEx(f, text, S, S * 0.02f, WHITE);
         if (!im.data) continue;
@@ -1019,33 +1197,49 @@ static int match_font_shape(const char *text, const unsigned char *mask, int mw,
                 }
         if (x1 < 0) { UnloadImage(im); continue; }
         int rw = x1 - x0 + 1, rh = y1 - y0 + 1;
-        float aspect = (float)rw / rh;
-        float grid[96 * 24] = { 0 };
+        float *cand = (float *)malloc(sizeof(float) * rw * rh);
         for (int y = 0; y < rh; y++)
-            for (int x = 0; x < rw; x++) grid[(y * GH / rh) * GW + x * GW / rw] += p[((y0 + y) * im.width + x0 + x) * 4 + 3] / 255.0f;
-        float cellArea = ((float)rw / GW) * ((float)rh / GH), rInk = 0;
-        float inter = 0, uni = 0;
-        for (int i = 0; i < GW * GH; i++) {
-            float a = fminf(1, grid[i] / cellArea), b = target[i];
-            rInk += a;
-            inter += fminf(a, b);
-            uni += fmaxf(a, b);
-        }
-        rInk /= GW * GH;
-        float iou = uni > 0 ? inter / uni : 0;
-        // Que también se parezca la proporción (lo ancha que es) y el grosor (cuánta tinta lleva)
-        float ar = fminf(aspect, targetAspect) / fmaxf(aspect, targetAspect);
-        float ink = (tInk > 0 && rInk > 0) ? fminf(tInk, rInk) / fmaxf(tInk, rInk) : 0;
-        float score = iou * 0.45f + ar * 0.3f + ink * 0.25f;
+            for (int x = 0; x < rw; x++) cand[y * rw + x] = p[((y0 + y) * im.width + x0 + x) * 4 + 3] / 255.0f;
+        shape_features(cand, rw, rh, cw, &cf);
+        free(cand);
+        float parts[6];
+        float score = shape_similarity(&target, &cf, parts);
+        // Las letras de caligrafía (unidas) casi nunca van en carteles con textos normales, y
+        // menos en mayúsculas: solo ganan si se parecen claramente más
+        static const char *SCRIPTS[] = { "Satisfy", "Great Vibes", "Dancing Script", "Pacifico", "Lobster", "Manuscrita" };
+        for (size_t k = 0; k < sizeof(SCRIPTS) / sizeof(SCRIPTS[0]); k++)
+            if (strcmp(font_name(fi), SCRIPTS[k]) == 0) score -= caps ? 0.08f : 0.04f;
+#if defined(LIENZO_TESTS)
+        if (getenv("LIENZO_DEBUG_FONTS")) printf("  %-22s ar %.3f ink %.3f filas %.3f horiz %.3f vert %.3f forma %.3f = %.3f\n", font_name(fi), parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], score);
+#endif
         if (score > bestScore) {
             bestScore = score;
             best = fi;
             *size = S * mh / rh;
             *topOff = y0 * (*size / S);
+            *inkW = rw * (*size / S);
         }
         UnloadImage(im);
     }
     return best;
+}
+
+// Caja para borrar un renglón: un poco más grande que las letras, pero sin meterse en los
+// renglones de arriba y de abajo (si no, el borde de la caja cogería sus letras como fondo)
+static void line_box(const OcrLine *lines, int n, int i, int *x0, int *y0, int *x1, int *y1)
+{
+    float pad = lines[i].h * 0.3f + 2, padY = lines[i].h * 0.06f + 1;
+    float top = lines[i].y - padY, bottom = lines[i].y + lines[i].h + padY;
+    for (int j = 0; j < n; j++) {
+        if (j == i) continue;
+        // Solo si se tocan en horizontal
+        if (lines[j].x > lines[i].x + lines[i].w || lines[j].x + lines[j].w < lines[i].x) continue;
+        float jb = lines[j].y + lines[j].h, jt = lines[j].y;
+        if (jb <= lines[i].y + lines[i].h * 0.5f && jb + 1 > top) top = fminf(lines[i].y, jb + 1);
+        if (jt >= lines[i].y + lines[i].h * 0.5f && jt - 1 < bottom) bottom = fmaxf(lines[i].y + lines[i].h, jt - 1);
+    }
+    *x0 = (int)(lines[i].x - pad); *y0 = (int)top;
+    *x1 = (int)(lines[i].x + lines[i].w + pad); *y1 = (int)bottom;
 }
 
 static void edit_text_box(int index)
@@ -1072,17 +1266,27 @@ static void edit_text_box(int index)
     bool gotColor = false;
     int longest = 0;
     unsigned char *mask = NULL;
-    int mw = 0, mh = 0;
+    int mw = 0, mh = 0, maskTop = 0;
     for (int i = 0; i < n; i++) if (strlen(lines[i].text) > strlen(lines[longest].text)) longest = i;
+    // Dónde hemos borrado letras (para la pasada de limpieza del final)
+    unsigned char *erased = (unsigned char *)calloc((size_t)src.width * src.height, 1);
     for (int i = 0; i < n; i++) {
-        float pad = lines[i].h * 0.3f + 2, padY = lines[i].h * 0.06f + 1;
-        int lx0 = (int)(lines[i].x - pad), ly0 = (int)(lines[i].y - padY);
-        int lx1 = (int)(lines[i].x + lines[i].w + pad), ly1 = (int)(lines[i].y + lines[i].h + padY);
+        int lx0, ly0, lx1, ly1;
+        line_box(lines, n, i, &lx0, &ly0, &lx1, &ly1);
         Image part, rest;
         int bx, by;
         Color c;
         if (!magic_extract_text(work, lx0, ly0, lx1, ly1, A.wandTol, &part, &bx, &by, &rest, &c)) continue;
+        {
+            unsigned char *pa = (unsigned char *)part.data;
+            for (int y = 0; y < part.height; y++)
+                for (int x = 0; x < part.width; x++) {
+                    int gx = bx + x, gy = by + y;
+                    if (gx >= 0 && gy >= 0 && gx < src.width && gy < src.height && pa[(y * part.width + x) * 4 + 3] >= 64) erased[gy * src.width + gx] = 1;
+                }
+        }
 #if defined(LIENZO_TESTS)
+        if (getenv("LIENZO_DEBUG_FONTS")) { char dp[64]; snprintf(dp, sizeof(dp), "debug_parte%d.png", i); ExportImage(part, dp); snprintf(dp, sizeof(dp), "debug_resto%d.png", i); ExportImage(rest, dp); }
         printf("renglon %d: %.0f %.0f %.0f %.0f color %02X%02X%02X '%s'\n", i, lines[i].x, lines[i].y, lines[i].w, lines[i].h, c.r, c.g, c.b, lines[i].text);
 #endif
         // Nos quedamos con el color que más contrasta con el fondo (el de las letras de verdad)
@@ -1093,31 +1297,132 @@ static void edit_text_box(int index)
             if (!gotColor || d > bestD) { main = c; bestD = d; gotColor = true; }
         }
         if (i == longest) {
-            // Máscara de las letras dentro de la caja del renglón
-            mw = (int)lines[i].w; mh = (int)lines[i].h;
-            if (mw > 2 && mh > 2) {
-                mask = (unsigned char *)calloc((size_t)mw * mh, 1);
-                unsigned char *pp = (unsigned char *)part.data;
-                for (int y = 0; y < mh; y++)
-                    for (int x = 0; x < mw; x++) {
-                        int px = (int)lines[i].x + x - bx, py = (int)lines[i].y + y - by;
-                        if (px >= 0 && py >= 0 && px < part.width && py < part.height) mask[y * mw + x] = pp[(py * part.width + px) * 4 + 3];
+            // Máscara de las letras: recortada justo a la tinta, igual que se recortan las
+            // letras de prueba de cada fuente, para que coincidan al compararlas
+            unsigned char *pp = (unsigned char *)part.data;
+            // Solo dentro de la caja del renglón leído (con 2 píxeles de margen), para no coger
+            // trocitos del renglón de arriba o de abajo
+            int ry0 = (int)lines[i].y - 2 - by, ry1 = (int)(lines[i].y + lines[i].h) + 2 - by;
+            int rx0 = (int)lines[i].x - 2 - bx, rx1 = (int)(lines[i].x + lines[i].w) + 2 - bx;
+            if (ry0 < 0) ry0 = 0;
+            if (rx0 < 0) rx0 = 0;
+            if (ry1 > part.height) ry1 = part.height;
+            if (rx1 > part.width) rx1 = part.width;
+            int qx0 = part.width, qy0 = part.height, qx1 = -1, qy1 = -1;
+            for (int y = ry0; y < ry1; y++)
+                for (int x = rx0; x < rx1; x++)
+                    if (pp[(y * part.width + x) * 4 + 3] > 100) {
+                        if (x < qx0) qx0 = x;
+                        if (x > qx1) qx1 = x;
+                        if (y < qy0) qy0 = y;
+                        if (y > qy1) qy1 = y;
                     }
+            mw = qx1 - qx0 + 1; mh = qy1 - qy0 + 1;
+            if (qx1 >= 0 && mw > 2 && mh > 2) {
+                mask = (unsigned char *)calloc((size_t)mw * mh, 1);
+                for (int y = 0; y < mh; y++)
+                    for (int x = 0; x < mw; x++) mask[y * mw + x] = pp[((qy0 + y) * part.width + qx0 + x) * 4 + 3];
+                maskTop = by + qy0;
+            }
+        }
+        // Sombra o contorno de las letras (otro color pegado a ellas): una segunda pasada que
+        // solo se acepta si lo que coge está casi todo junto a las letras ya borradas
+        {
+            Image part2, rest2;
+            int bx2, by2;
+            Color c2;
+            if (magic_extract_text(rest, lx0, ly0, lx1, ly1, A.wandTol, &part2, &bx2, &by2, &rest2, &c2)) {
+                int rad = (int)fmaxf(3, lines[i].h * 0.12f);
+                unsigned char *p1 = (unsigned char *)part.data, *p2 = (unsigned char *)part2.data;
+                int ink = 0, near = 0;
+                for (int y = 0; y < part2.height; y++)
+                    for (int x = 0; x < part2.width; x++) {
+                        if (p2[(y * part2.width + x) * 4 + 3] < 128) continue;
+                        ink++;
+                        // ¿Hay letra borrada cerca?
+                        int gx = bx2 + x - bx, gy = by2 + y - by;
+                        bool found = false;
+                        for (int dy = -rad; dy <= rad && !found; dy += 1)
+                            for (int dx = -rad; dx <= rad && !found; dx += 1) {
+                                int xx = gx + dx, yy = gy + dy;
+                                if (xx < 0 || yy < 0 || xx >= part.width || yy >= part.height) continue;
+                                if (p1[(yy * part.width + xx) * 4 + 3] >= 128) found = true;
+                            }
+                        if (found) near++;
+                    }
+#if defined(LIENZO_TESTS)
+                printf("  sombra: %d de %d junto a las letras (letras %d), color %02X%02X%02X\n", near, ink, part.width * part.height, c2.r, c2.g, c2.b);
+#endif
+                int ink1 = 0;
+                for (int k = 0; k < part.width * part.height; k++) if (p1[k * 4 + 3] >= 128) ink1++;
+                // Una sombra es menos que las propias letras; si coge más, es el fondo
+                if (ink > 0 && near >= ink * 0.85f && ink <= ink1) { UnloadImage(rest); rest = rest2; }
+                else UnloadImage(rest2);
+                UnloadImage(part2);
             }
         }
         UnloadImage(part);
         UnloadImage(work);
         work = rest;
     }
+    // Limpieza: al borrar un renglón, el relleno puede coger color de las letras del renglón
+    // de al lado, que aún no estaban borradas. Ahora que ya no están, se repasa cada renglón y
+    // se quita lo que quede pegado a donde había letras.
+    for (int i = 0; i < n; i++) {
+        int lx0, ly0, lx1, ly1;
+        line_box(lines, n, i, &lx0, &ly0, &lx1, &ly1);
+        Image part, rest;
+        int bx, by;
+        Color c;
+        if (!magic_extract_text(work, lx0, ly0, lx1, ly1, A.wandTol * 0.7f, &part, &bx, &by, &rest, &c)) continue;
+        int rad = (int)fmaxf(2, lines[i].h * 0.08f);
+        unsigned char *pa = (unsigned char *)part.data;
+        int ink = 0, near = 0;
+        for (int y = 0; y < part.height; y++)
+            for (int x = 0; x < part.width; x++) {
+                if (pa[(y * part.width + x) * 4 + 3] < 128) continue;
+                ink++;
+                int gx = bx + x, gy = by + y;
+                bool found = false;
+                for (int dy = -rad; dy <= rad && !found; dy++)
+                    for (int dx = -rad; dx <= rad && !found; dx++) {
+                        int xx = gx + dx, yy = gy + dy;
+                        if (xx >= 0 && yy >= 0 && xx < src.width && yy < src.height && erased[yy * src.width + xx]) found = true;
+                    }
+                if (found) near++;
+            }
+#if defined(LIENZO_TESTS)
+        printf("  limpieza %d: %d de %d junto a lo borrado\n", i, near, ink);
+#endif
+        UnloadImage(part);
+        if (ink > 0 && near >= ink * 0.9f) { UnloadImage(work); work = rest; }
+        else UnloadImage(rest);
+    }
+    free(erased);
     UnloadImage(src);
     // Elegir la fuente y el tamaño
-    float size = lines[longest].h / 0.75f, topOff = 0;
+    float size = lines[longest].h / 0.75f, topOff = 0, letterSp = 0;
     int font = font_find("Moderna");
     if (font < 0) font = 0;
     if (mask) {
-        font = match_font_shape(lines[longest].text, mask, mw, mh, &size, &topOff);
+        float inkW = 0;
+        font = match_font_shape(lines[longest].text, mask, mw, mh, &size, &topOff, &inkW);
+        // Espacio entre letras: lo que falta (o sobra) de ancho, repartido entre las letras
+        int chars = 0;
+        for (const char *q = lines[longest].text; *q;) { int b = 0; GetCodepoint(q, &b); q += b > 0 ? b : 1; chars++; }
+        if (inkW > 0 && chars > 1) {
+            float extra = (mw - inkW) / (chars - 1) / size;
+            if (extra < -0.04f) {
+                // Más estrecho que nuestra letra: un poco más pequeña y algo más juntas
+                float k2 = fmaxf(0.88f, (float)mw / inkW);
+                size *= k2; topOff *= k2; inkW *= k2;
+                extra = (mw - inkW) / (chars - 1) / size;
+            }
+            if (fabsf(extra) > 0.012f) letterSp = fmaxf(-0.05f, fminf(0.6f, extra));
+        }
         free(mask);
     }
+    bool hadMask = mask != NULL;
     float sx = e->w / (float)work.width, sy = e->h / (float)work.height;
     int restId = asset_add_image(work);
     UnloadImage(work);
@@ -1154,6 +1459,7 @@ static void edit_text_box(int index)
     float k = sy;
     t->font = font;
     t->fontSize = fmaxf(6, roundf(size * k));
+    t->letterSpacing = letterSp;
     t->fill = main;
     t->align = align;
     if (n > 1) {
@@ -1163,10 +1469,18 @@ static void edit_text_box(int index)
     }
     float ls = t->lineSpacing > 0.3f ? t->lineSpacing : 1.18f;
     float boxW = (maxR - minL) * sx;
-    t->w = boxW * 1.12f + t->fontSize * 0.4f;
+    // Caja tan ancha como el renglón más largo escrito con la letra elegida (así no se parte)
+    float maxMeasured = 0;
+    for (int i = 0; i < n; i++) {
+        Vector2 m = MeasureTextEx(font_get(font), lines[i].text, t->fontSize, t->fontSize * (0.02f + t->letterSpacing));
+        maxMeasured = fmaxf(maxMeasured, m.x);
+    }
+    t->w = fmaxf(boxW, maxMeasured) * 1.04f + t->fontSize * 0.3f;
     float left = minL * sx, right = maxR * sx;
     float lx = align == ALIGN_CENTER ? (left + right) / 2 - t->w / 2 : align == ALIGN_RIGHT ? right - t->w : left - t->fontSize * 0.05f;
-    float ty = lines[0].y * sy - (t->fontSize * (ls - 1) / 2 + topOff * k);
+    // Arriba de la tinta del primer renglón (medida en el renglón más largo)
+    float inkTop = hadMask ? maskTop - (lines[longest].y - lines[0].y) : lines[0].y;
+    float ty = inkTop * sy - (t->fontSize * (ls - 1) / 2 + topOff * k);
     fix_text_height(t);
     t->rotation = orig.rotation;
     // Posición dentro de la imagen (por si la imagen no empieza en 0,0 o está girada)
@@ -2618,6 +2932,9 @@ static void draw_toolbar(void)
             x += aw[i] + 2;
         }
         x += 10;
+        float ls0 = e->letterSpacing;
+        x = tb_slider(6, "Espacio letras", x, y, 96, &e->letterSpacing, -0.05f, 0.6f);
+        if (e->letterSpacing != ls0) fix_text_height(e);
     }
     x = tb_divider(x, y);
     x = tb_slider(4, "Transparencia", x, y, 110, &e->opacity, 0.05f, 1);
@@ -2865,12 +3182,41 @@ static void test_step(const char *dir, int frame)
     case 225: test_shot(dir, "17_lapiz"); break;
     case 226: {
         // Leer y rehacer el texto gris (3 renglones) y el título marrón
-        A.boxStart = (Vector2){ 225, 362 }; A.boxEnd = (Vector2){ 1065, 535 };
-        edit_text_box(0);
-        A.boxStart = (Vector2){ 195, 190 }; A.boxEnd = (Vector2){ 1095, 310 };
-        select_index(0);
-        edit_text_box(0);
-        for (int i = 0; i < A.doc.count; i++) if (A.doc.el[i].type == EL_TEXT) printf("TEXTO fuente=%s tam=%.0f interl=%.2f al=%d color=%02X%02X%02X \"%s\"\n", font_name(A.doc.el[i].font), A.doc.el[i].fontSize, A.doc.el[i].lineSpacing, A.doc.el[i].align, A.doc.el[i].fill.r, A.doc.el[i].fill.g, A.doc.el[i].fill.b, A.doc.el[i].text);
+        const char *clicks = getenv("LIENZO_TEST_CLICKS");
+        if (clicks) {
+            const char *q = clicks;
+            float a, b;
+            int used;
+            while (sscanf(q, "%f,%f%n", &a, &b, &used) == 2) {
+                select_index(0);
+                wand_at(0, (Vector2){ a, b });
+                q += used;
+                if (*q == ';') q++;
+            }
+            for (int i = 0; i < A.doc.count; i++) printf("ELEMENTO %d tipo %d %.0f,%.0f %.0fx%.0f\n", i, A.doc.el[i].type, A.doc.el[i].x, A.doc.el[i].y, A.doc.el[i].w, A.doc.el[i].h);
+            break;
+        }
+        const char *boxes = getenv("LIENZO_TEST_BOXES");
+        if (boxes) {
+            // "x0,y0,x1,y1;x0,y0,x1,y1..." para probar otras imágenes
+            const char *q = boxes;
+            float a, b, c, d;
+            int used;
+            while (sscanf(q, "%f,%f,%f,%f%n", &a, &b, &c, &d, &used) == 4) {
+                A.boxStart = (Vector2){ a, b }; A.boxEnd = (Vector2){ c, d };
+                select_index(0);
+                edit_text_box(0);
+                q += used;
+                if (*q == ';') q++;
+            }
+        } else {
+            A.boxStart = (Vector2){ 225, 362 }; A.boxEnd = (Vector2){ 1065, 535 };
+            edit_text_box(0);
+            A.boxStart = (Vector2){ 195, 190 }; A.boxEnd = (Vector2){ 1095, 310 };
+            select_index(0);
+            edit_text_box(0);
+        }
+        for (int i = 0; i < A.doc.count; i++) if (A.doc.el[i].type == EL_TEXT) printf("TEXTO esp=%.3f fuente=%s tam=%.0f interl=%.2f al=%d color=%02X%02X%02X \"%s\"\n", A.doc.el[i].letterSpacing, font_name(A.doc.el[i].font), A.doc.el[i].fontSize, A.doc.el[i].lineSpacing, A.doc.el[i].align, A.doc.el[i].fill.r, A.doc.el[i].fill.g, A.doc.el[i].fill.b, A.doc.el[i].text);
         stop_editing();
         select_index(0);
         // Separar la espiral de la izquierda y el teléfono
@@ -2888,7 +3234,7 @@ static void test_step(const char *dir, int frame)
         select_index(-1);
         break;
     }
-    case 230: test_shot(dir, "18_lapiz_separado"); { char p[1200]; snprintf(p, sizeof(p), "%s/texto_editado.png", dir); export_png(&A.doc, p); } break;
+    case 230: test_shot(dir, "18_lapiz_separado"); if (getenv("LIENZO_TEST_HIDETEXT")) for (int i = 0; i < A.doc.count; i++) if (A.doc.el[i].type == EL_TEXT) A.doc.el[i].visible = false; { char p[1200]; snprintf(p, sizeof(p), "%s/texto_editado.png", dir); export_png(&A.doc, p); } break;
     case 232: {
         const char *pdf = getenv("LIENZO_TEST_PDF");
         if (!pdf) { A.quit = true; break; }

@@ -32,7 +32,7 @@ bool plat_make_dir(const char *path);
 int plat_list_dir(const char *dir, const char *ext, char (*names)[260], int max);
 
 // Leer el texto de una imagen PNG (OCR). En Windows usa el lector de texto que trae el sistema.
-// Escribe una línea por cada renglón: "x y ancho alto<TAB>texto" (en píxeles de la imagen).
+// Escribe una línea por cada palabra: "renglón x y ancho alto<TAB>palabra" (en píxeles de la imagen).
 // Devuelve false si no se ha podido (por ejemplo, Windows sin el idioma instalado).
 bool plat_ocr(const char *pngPath, char *out, int max);
 

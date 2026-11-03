@@ -479,6 +479,7 @@ bool doc_save(const Document *d, const char *path)
             str_printf(&s, "fuente %s\n", font_name(e->font));
             str_printf(&s, "efecto %d %d %d %d %d %.3f\n", e->effect, e->effectColor.r, e->effectColor.g, e->effectColor.b, e->effectColor.a, e->effectAmount);
             if (e->lineSpacing > 0) str_printf(&s, "interlineado %.3f\n", e->lineSpacing);
+            if (e->letterSpacing != 0) str_printf(&s, "espaciado %.4f\n", e->letterSpacing);
             str_printf(&s, "texto ");
             escape_text(&s, e->text);
             str_add(&s, "\n", 1);
@@ -566,6 +567,8 @@ bool doc_load(Document *d, const char *path)
                 le->effectColor = (Color){ (unsigned char)r, (unsigned char)g, (unsigned char)b, (unsigned char)a };
                 le->effectAmount = amt;
             }
+        } else if (strncmp(line, "espaciado ", 10) == 0 && tmp->count > 0) {
+            tmp->el[tmp->count - 1].letterSpacing = (float)atof(line + 10);
         } else if (strncmp(line, "interlineado ", 13) == 0 && tmp->count > 0) {
             tmp->el[tmp->count - 1].lineSpacing = (float)atof(line + 13);
         } else if (strncmp(line, "tinte ", 6) == 0 && tmp->count > 0) {

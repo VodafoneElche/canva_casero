@@ -35,14 +35,24 @@ static const FontSpec SYSTEM_FONTS[] = {
 // Nombres bonitos para las fuentes incluidas (archivo -> nombre)
 static const struct { const char *file; const char *name; } BUNDLED_NAMES[] = {
     { "Poppins-Regular.ttf", "Poppins" }, { "Poppins-Bold.ttf", "Poppins negrita" }, { "Poppins-Black.ttf", "Poppins gruesa" },
-    { "Montserrat.ttf", "Montserrat" }, { "PlayfairDisplay.ttf", "Playfair" }, { "AbrilFatface-Regular.ttf", "Abril Fatface" },
+    { "Montserrat-Regular.ttf", "Montserrat" }, { "PlayfairDisplay-Regular.ttf", "Playfair" }, { "AbrilFatface-Regular.ttf", "Abril Fatface" },
     { "Cinzel.ttf", "Cinzel" }, { "Lobster-Regular.ttf", "Lobster" }, { "Pacifico-Regular.ttf", "Pacifico" },
     { "DancingScript.ttf", "Dancing Script" }, { "GreatVibes-Regular.ttf", "Great Vibes" }, { "Satisfy-Regular.ttf", "Satisfy" },
     { "Caveat.ttf", "Caveat" }, { "IndieFlower-Regular.ttf", "Indie Flower" }, { "PermanentMarker-Regular.ttf", "Rotulador" },
     { "AmaticSC-Bold.ttf", "Amatic" }, { "BebasNeue-Regular.ttf", "Bebas Neue" }, { "Anton-Regular.ttf", "Anton" },
     { "Bungee-Regular.ttf", "Bungee" }, { "Bangers-Regular.ttf", "Bangers (cómic)" }, { "LuckiestGuy-Regular.ttf", "Luckiest Guy" },
-    { "Righteous-Regular.ttf", "Righteous" }, { "Fredoka.ttf", "Fredoka" }, { "Comfortaa.ttf", "Comfortaa" },
+    { "Righteous-Regular.ttf", "Righteous" }, { "Fredoka-Regular.ttf", "Fredoka" }, { "Comfortaa.ttf", "Comfortaa" },
     { "SpecialElite-Regular.ttf", "Máquina antigua" },
+    { "Montserrat-Bold.ttf", "Montserrat negrita" }, { "Montserrat-Light.ttf", "Montserrat fina" },
+    { "PlayfairDisplay-Bold.ttf", "Playfair negrita" },
+    { "Lato-Regular.ttf", "Lato" }, { "Lato-Bold.ttf", "Lato negrita" }, { "Lato-Light.ttf", "Lato fina" },
+    { "LibreBaskerville-Regular.ttf", "Baskerville" }, { "LibreBaskerville-Bold.ttf", "Baskerville negrita" },
+    { "Lora-Regular.ttf", "Lora" }, { "Lora-Bold.ttf", "Lora negrita" },
+    { "CormorantGaramond-Medium.ttf", "Cormorant" }, { "CormorantGaramond-Bold.ttf", "Cormorant negrita" },
+    { "DMSerifDisplay-Regular.ttf", "DM Serif" }, { "EBGaramond-Regular.ttf", "Garamond" },
+    { "Roboto-Regular.ttf", "Roboto" }, { "Roboto-Bold.ttf", "Roboto negrita" },
+    { "OpenSans-Regular.ttf", "Open Sans" }, { "OpenSans-Bold.ttf", "Open Sans negrita" },
+    { "Raleway-Regular.ttf", "Raleway" }, { "Raleway-Bold.ttf", "Raleway negrita" },
 };
 
 static int g_codepoints[400];
@@ -373,6 +383,9 @@ static int shape_points(const Element *e, Vector2 *p, Vector2 *center)
 
 // ------------------------------------------------------------------ Texto
 
+// Espacio entre letras: un poco siempre, más lo que tenga el texto
+#define TEXT_SPACING(e) ((e)->fontSize * (0.02f + (e)->letterSpacing))
+
 typedef struct { int start, end; float width; } TextLine;
 
 // Parte el texto en líneas que caben en el ancho de la caja
@@ -380,7 +393,7 @@ static int layout_text(const Element *e, TextLine *lines, int maxLines)
 {
     Font f = font_get(e->font);
     float size = e->fontSize;
-    float spacing = size * 0.02f;
+    float spacing = TEXT_SPACING(e);
     const char *t = e->text;
     int len = (int)strlen(t);
     int n = 0;
@@ -461,7 +474,7 @@ Vector2 text_caret_pos(const Element *e, int byteIndex, float *lineH)
             if (k > lines[i].end - lines[i].start) k = lines[i].end - lines[i].start;
             memcpy(tmp, e->text + lines[i].start, k);
             tmp[k] = 0;
-            float x = line_x(e, lines[i].width) + MeasureTextEx(f, tmp, size, size * 0.02f).x;
+            float x = line_x(e, lines[i].width) + MeasureTextEx(f, tmp, size, TEXT_SPACING(e)).x;
             return (Vector2){ x, -e->h / 2 + i * size * LINE_SPACING };
         }
     }
@@ -478,7 +491,7 @@ static void draw_text_lines(const Element *e, const TextLine *lines, int n, Font
         memcpy(tmp, e->text + lines[i].start, l);
         tmp[l] = 0;
         Vector2 pos = { line_x(e, lines[i].width) + dx, -e->h / 2 + i * size * LINE_SPACING + size * (LINE_SPACING - 1) / 2 + dy };
-        DrawTextEx(f, tmp, pos, size, size * 0.02f, col);
+        DrawTextEx(f, tmp, pos, size, TEXT_SPACING(e), col);
     }
 }
 

@@ -205,10 +205,10 @@ static const char OCR_PS1[] =
 "if ($engine -eq $null) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }\r\n"
 "$res = Await ($engine.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])\r\n"
 "$sb = New-Object System.Text.StringBuilder\r\n"
+"$ln = 0\r\n"
 "foreach ($line in $res.Lines) {\r\n"
-"  $x0 = 1e9; $y0 = 1e9; $x1 = -1e9; $y1 = -1e9\r\n"
-"  foreach ($w in $line.Words) { $r = $w.BoundingRect; if ($r.X -lt $x0) { $x0 = $r.X }; if ($r.Y -lt $y0) { $y0 = $r.Y }; if ($r.X + $r.Width -gt $x1) { $x1 = $r.X + $r.Width }; if ($r.Y + $r.Height -gt $y1) { $y1 = $r.Y + $r.Height } }\r\n"
-"  $null = $sb.Append(('{0} {1} {2} {3}' -f [int]$x0, [int]$y0, [int]($x1 - $x0), [int]($y1 - $y0)) + \"`t\" + $line.Text + \"`n\")\r\n"
+"  foreach ($w in $line.Words) { $r = $w.BoundingRect; $null = $sb.Append(('{0} {1} {2} {3} {4}' -f $ln, [int]$r.X, [int]$r.Y, [int]$r.Width, [int]$r.Height) + \"`t\" + $w.Text + \"`n\") }\r\n"
+"  $ln++\r\n"
 "}\r\n"
 "[System.IO.File]::WriteAllText($out, $sb.ToString(), (New-Object System.Text.UTF8Encoding $false))\r\n"
 "} catch { [System.IO.File]::WriteAllText($out, 'ERROR ' + $_.Exception.Message) }\r\n";
@@ -383,8 +383,7 @@ bool plat_ocr(const char *pngPath, char *out, int max)
     FILE *p = popen(cmd, "r");
     if (!p) return false;
     char line[2048];
-    int curKey = -1, x0 = 0, y0 = 0, x1 = 0, y1 = 0, len = 0;
-    char text[1024] = { 0 };
+    int curKey = -1, lineNo = -1, len = 0;
     bool any = false;
     while (fgets(line, sizeof(line), p)) {
         int level, page, block, par, ln, word, l, t, w, h;
@@ -393,20 +392,11 @@ bool plat_ocr(const char *pngPath, char *out, int max)
         if (sscanf(line, "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%f\t%511[^\n]", &level, &page, &block, &par, &ln, &word, &l, &t, &w, &h, &conf, wtext) < 11) continue;
         if (level != 5 || !wtext[0]) continue;
         int key = block * 10000 + par * 100 + ln;
-        if (key != curKey) {
-            if (any) len += snprintf(out + len, max - len, "%d %d %d %d\t%s\n", x0, y0, x1 - x0, y1 - y0, text);
-            curKey = key; x0 = l; y0 = t; x1 = l + w; y1 = t + h; text[0] = 0; any = true;
-        } else {
-            if (l < x0) x0 = l;
-            if (t < y0) y0 = t;
-            if (l + w > x1) x1 = l + w;
-            if (t + h > y1) y1 = t + h;
-            strncat(text, " ", sizeof(text) - strlen(text) - 1);
-        }
-        strncat(text, wtext, sizeof(text) - strlen(text) - 1);
+        if (key != curKey) { curKey = key; lineNo++; }
+        len += snprintf(out + len, max - len, "%d %d %d %d %d\t%s\n", lineNo, l, t, w, h, wtext);
+        any = true;
         if (len >= max - 1) break;
     }
-    if (any && len < max - 1) len += snprintf(out + len, max - len, "%d %d %d %d\t%s\n", x0, y0, x1 - x0, y1 - y0, text);
     pclose(p);
     return any;
 }

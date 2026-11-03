@@ -6,7 +6,7 @@ Unicode true
 !include "x64.nsh"
 
 !ifndef VERSION
-  !define VERSION "0.6.0"
+  !define VERSION "0.7.0"
 !endif
 !ifndef EXE
   !define EXE "..\build\LienzoCasero.exe"
@@ -70,6 +70,10 @@ Section "Programa" SecMain
   File "/oname=icono.ico" "..\assets\icon.ico"
   ; Fuentes gratuitas que vienen con el programa
   SetOutPath "$INSTDIR\fuentes"
+  ; Versiones antiguas (variables) que se han cambiado por otras
+  Delete "$INSTDIR\fuentes\Montserrat.ttf"
+  Delete "$INSTDIR\fuentes\PlayfairDisplay.ttf"
+  Delete "$INSTDIR\fuentes\Fredoka.ttf"
   File "..\assets\fonts\*.ttf"
   File "..\assets\fonts\OFL.txt"
   File "..\assets\fonts\LICENSE-Apache.txt"

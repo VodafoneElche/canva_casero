@@ -12,7 +12,7 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 - **Plantillas**: 6 de ejemplo (cumpleaños, invitación, Navidad, lista de la compra,
   menú semanal, nota para la nevera) y las tuyas propias con "Guardar plantilla".
 - **Textos** con tamaño, color y alineación. Doble clic para escribir.
-- **Fuentes**: 25 gratuitas incluidas (Lobster, Pacifico, Bungee, Bebas Neue, Playfair...),
+- **Fuentes**: 45 gratuitas incluidas (Lobster, Pacifico, Bebas Neue, Playfair, Lato, Lora, Baskerville, Garamond, Roboto...),
   las de Windows y las que tú añadas (.ttf u .otf de fonts.google.com, dafont.com...).
   Una fuente añadida viaja dentro del diseño: al abrirlo en otro ordenador se instala sola.
 - **Efectos de texto**: sombra, contorno, relieve 3D, grabado y neón, con color e intensidad.
@@ -31,7 +31,7 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 - **Editar texto de la imagen** (para JPEG): rodea un texto de la imagen; el programa lee las
   letras con el lector de texto de Windows 10/11, las borra rellenando el hueco con el fondo y
   pone en su sitio un texto editable con la letra más parecida, el mismo tamaño, color,
-  alineación e interlineado.
+  alineación, interlineado y espacio entre letras. También quita la sombra pegada a las letras.
 - **Imágenes**: desde el ordenador, arrastrándolas a la ventana o pegándolas con Ctrl+V.
   Se guardan dentro del diseño, así que un `.lienzo` se puede pasar a otro ordenador.
 - **Mover, cambiar de tamaño y girar** con el ratón. Imán para centrar en el lienzo.
@@ -45,7 +45,7 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 1. Entra en la pestaña **Actions** del repositorio, abre la última ejecución correcta de
    "Compilar" y descarga `LienzoCasero-instalador-windows`.
    (Cuando se publique una versión, también estará en **Releases**.)
-2. Descomprime el zip y ejecuta `LienzoCasero-0.6.0-instalador.exe`.
+2. Descomprime el zip y ejecuta `LienzoCasero-0.7.0-instalador.exe`.
 3. Windows puede avisar con "Windows protegió su PC" porque el programa no está firmado:
    pulsa **Más información** y luego **Ejecutar de todas formas**.
 
