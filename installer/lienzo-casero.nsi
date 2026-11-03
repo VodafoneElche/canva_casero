@@ -6,7 +6,7 @@ Unicode true
 !include "x64.nsh"
 
 !ifndef VERSION
-  !define VERSION "0.2.0"
+  !define VERSION "0.3.0"
 !endif
 !ifndef EXE
   !define EXE "..\build\LienzoCasero.exe"
@@ -74,6 +74,9 @@ Section "Programa" SecMain
   File "..\assets\fonts\OFL.txt"
   File "..\assets\fonts\LICENSE-Apache.txt"
   File "..\assets\fonts\LEEME.md"
+  ; Dibujos (Twemoji, licencia CC BY 4.0)
+  SetOutPath "$INSTDIR\dibujos"
+  File /r "..\assets\dibujos\*.*"
   SetOutPath "$INSTDIR"
 
   ; Accesos directos (para todos los usuarios del ordenador)
@@ -111,6 +114,7 @@ Section "Uninstall"
   Delete "$INSTDIR\icono.ico"
   Delete "$INSTDIR\Desinstalar.exe"
   RMDir /r "$INSTDIR\fuentes"
+  RMDir /r "$INSTDIR\dibujos"
   RMDir "$INSTDIR"
   DeleteRegKey HKLM "Software\Classes\LienzoCasero.Diseno"
   ReadRegStr $0 HKLM "Software\Classes\.lienzo" ""

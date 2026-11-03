@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(LienzoCasero VERSION 0.2.0 LANGUAGES C)
+project(LienzoCasero VERSION 0.3.0 LANGUAGES C)
 if(WIN32)
     enable_language(RC)
 endif()
@@ -36,7 +36,10 @@ set(SOURCES
     src/ui.c
     src/templates.c
     src/platform.c
+    src/svg.c
 )
+# nanosvg es código de otra persona: sin avisos
+set_source_files_properties(src/svg.c PROPERTIES COMPILE_OPTIONS "-w")
 
 if(WIN32)
     # Icono y datos del programa (los usa Windows en el Explorador y la barra de tareas)
@@ -62,7 +65,8 @@ endif()
 
 # Copiar las fuentes incluidas junto al programa (carpeta "fuentes")
 add_custom_command(TARGET LienzoCasero POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/fonts $<TARGET_FILE_DIR:LienzoCasero>/fuentes)
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/fonts $<TARGET_FILE_DIR:LienzoCasero>/fuentes
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/dibujos $<TARGET_FILE_DIR:LienzoCasero>/dibujos)
 
 option(LIENZO_TESTS "Compilar el modo de pruebas automáticas" OFF)
 if(LIENZO_TESTS)
@@ -71,3 +75,4 @@ endif()
 
 install(TARGETS LienzoCasero RUNTIME DESTINATION .)
 install(DIRECTORY assets/fonts/ DESTINATION fuentes)
+install(DIRECTORY assets/dibujos/ DESTINATION dibujos)

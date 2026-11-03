@@ -1,6 +1,7 @@
 #include "doc.h"
 #include "platform.h"
 #include "render.h"
+#include "svg.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -64,7 +65,9 @@ int asset_load_file(const char *path)
     char lower[16] = {0};
     for (int i = 0; ext && ext[i] && i < 15; i++) lower[i] = (char)(ext[i] >= 'A' && ext[i] <= 'Z' ? ext[i] + 32 : ext[i]);
     if (strcmp(lower, ".jpeg") == 0) strcpy(lower, ".jpg");
-    Image img = LoadImageFromMemory(lower[0] ? lower : ".png", data, size);
+    Image img;
+    if (strcmp(lower, ".svg") == 0) img = svg_to_image(data, size, 1400);   // dibujos vectoriales
+    else img = LoadImageFromMemory(lower[0] ? lower : ".png", data, size);
     free(data);
     if (img.data == NULL) return -1;
     int id = asset_add_image(img);

@@ -6,6 +6,7 @@
 #include "doc.h"
 #include "platform.h"
 #include "render.h"
+#include "svg.h"
 #include "templates.h"
 #include "ui.h"
 
@@ -24,7 +25,7 @@ extern void glfwSetWindowShouldClose(void *window, int value);
 #define PANEL_W 310
 #define BOTTOM_H 40
 
-typedef enum { PANEL_DESIGN, PANEL_TEMPLATES, PANEL_ELEMENTS, PANEL_TEXT, PANEL_IMAGES, PANEL_LAYERS, PANEL_COUNT } PanelId;
+typedef enum { PANEL_DESIGN, PANEL_TEMPLATES, PANEL_ELEMENTS, PANEL_CLIPART, PANEL_TEXT, PANEL_IMAGES, PANEL_LAYERS, PANEL_COUNT } PanelId;
 typedef enum { POP_NONE, POP_FILE, POP_EXPORT, POP_COLOR, POP_FONT, POP_EFFECT } PopupId;
 typedef enum { MODAL_NONE, MODAL_NEW, MODAL_SAVE_TEMPLATE } ModalId;
 typedef enum { DRAG_NONE, DRAG_MOVE, DRAG_RESIZE, DRAG_ROTATE, DRAG_PAN } DragMode;
@@ -1328,6 +1329,13 @@ static void icon_panel(PanelId p, float cx, float cy, Color c)
         DrawRectangle((int)cx + 1, (int)cy - 1, 10, 10, c);
         DrawTriangle((Vector2){ cx - 6, cy + 2 }, (Vector2){ cx - 12, cy + 11 }, (Vector2){ cx, cy + 11 }, c);
         break;
+    case PANEL_CLIPART:
+        DrawCircleLinesV((Vector2){ cx, cy }, 11, c);
+        DrawCircleLinesV((Vector2){ cx, cy }, 10.4f, c);
+        DrawCircleV((Vector2){ cx - 4, cy - 3 }, 1.8f, c);
+        DrawCircleV((Vector2){ cx + 4, cy - 3 }, 1.8f, c);
+        DrawRing((Vector2){ cx, cy + 1 }, 4.5f, 6, 20, 160, 10, c);
+        break;
     case PANEL_TEXT:
         DrawTextEx(g_uiFontBold, "T", (Vector2){ cx - 7, cy - 13 }, 26, 0, c);
         break;
@@ -1345,7 +1353,7 @@ static void icon_panel(PanelId p, float cx, float cy, Color c)
     }
 }
 
-static const char *PANEL_NAMES[PANEL_COUNT] = { "Diseño", "Plantillas", "Elementos", "Texto", "Imágenes", "Capas" };
+static const char *PANEL_NAMES[PANEL_COUNT] = { "Diseño", "Plantillas", "Elementos", "Dibujos", "Texto", "Imágenes", "Capas" };
 
 static void draw_rail(void)
 {
@@ -1540,6 +1548,120 @@ static float panel_elements(float x, float y, float w)
     return y + 50;
 }
 
+// ------------------------------------------------------------------ Dibujos incluidos
+// Están en la carpeta "dibujos" junto al programa, una subcarpeta por tema.
+
+typedef struct { char path[1400]; Texture2D thumb; bool tried; } ClipItem;
+static const struct { const char *folder; const char *title; } CLIP_CATS[] = {
+    { "01-fiestas", "Fiestas y cumpleaños" }, { "02-amor", "Amor" }, { "03-naturaleza", "Naturaleza" },
+    { "04-animales", "Animales" }, { "05-comida", "Comida" }, { "06-casa-y-cole", "Casa y cole" },
+    { "07-viajes", "Viajes" }, { "08-navidad-y-fiestas", "Navidad, Halloween y Pascua" },
+    { "09-caras-y-manos", "Caras y manos" }, { "10-simbolos", "Símbolos" },
+};
+#define CLIP_CAT_COUNT ((int)(sizeof(CLIP_CATS) / sizeof(CLIP_CATS[0])))
+#define MAX_CLIPS 1000
+static ClipItem g_clips[MAX_CLIPS];
+static int g_clipCount = 0;
+static int g_clipCatStart[CLIP_CAT_COUNT + 1];
+static bool g_clipsLoaded = false;
+
+static int cmp_str260(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+
+static void clipart_init(void)
+{
+    if (g_clipsLoaded) return;
+    g_clipsLoaded = true;
+    static char names[300][260];
+    for (int c = 0; c < CLIP_CAT_COUNT; c++) {
+        g_clipCatStart[c] = g_clipCount;
+        char dir[1300];
+        snprintf(dir, sizeof(dir), "%sdibujos/%s", GetApplicationDirectory(), CLIP_CATS[c].folder);
+        int n = plat_list_dir(dir, ".svg", names, 300);
+        qsort(names, n, 260, cmp_str260);
+        for (int i = 0; i < n && g_clipCount < MAX_CLIPS; i++) {
+            ClipItem *it = &g_clips[g_clipCount++];
+            memset(it, 0, sizeof(*it));
+            snprintf(it->path, sizeof(it->path), "%s/%s", dir, names[i]);
+        }
+    }
+    g_clipCatStart[CLIP_CAT_COUNT] = g_clipCount;
+}
+
+static Texture2D clip_thumb(int i, int *budget)
+{
+    ClipItem *it = &g_clips[i];
+    if (!it->tried && *budget > 0) {
+        (*budget)--;
+        it->tried = true;
+        int size = 0;
+        unsigned char *data = plat_read_file(it->path, &size);
+        if (data) {
+            Image img = svg_to_image(data, size, 96);
+            free(data);
+            if (img.data) {
+                it->thumb = LoadTextureFromImage(img);
+                SetTextureFilter(it->thumb, TEXTURE_FILTER_BILINEAR);
+                UnloadImage(img);
+            }
+        }
+    }
+    return it->thumb;
+}
+
+static void add_clip(int i)
+{
+    int id = asset_load_file(g_clips[i].path);
+    if (id < 0) { toast("No se ha podido abrir ese dibujo"); return; }
+    add_image_asset(id, doc_center());
+    Element *e = selected();
+    if (e) {
+        // Los dibujos entran más pequeños que las fotos
+        float s = base_size() / fmaxf(e->w, e->h);
+        Vector2 c = { e->x + e->w / 2, e->y + e->h / 2 };
+        e->w *= s; e->h *= s;
+        e->x = c.x - e->w / 2; e->y = c.y - e->h / 2;
+    }
+}
+
+static float panel_clipart(float x, float y, float w)
+{
+    clipart_init();
+    if (ui_button((Rectangle){ x, y, w, 42 }, "Abrir un dibujo SVG del ordenador", BTN_NORMAL)) cmd_upload_image();
+    y += 48;
+    ui_text("Por ejemplo, los que descargues de", x, y, 14, COL_MUTED);
+    ui_text("vector4free.com para uso en casa.", x, y + 18, 14, COL_MUTED);
+    y += 48;
+    if (g_clipCount == 0) {
+        ui_text("No se encuentra la carpeta \"dibujos\".", x, y, 15, COL_MUTED);
+        return y + 30;
+    }
+    int budget = 6;
+    int cols = 5;
+    float gap = 7, cs = (w - gap * (cols - 1)) / cols;
+    for (int c = 0; c < CLIP_CAT_COUNT; c++) {
+        int first = g_clipCatStart[c], last = g_clipCatStart[c + 1];
+        if (first == last) continue;
+        y = section_title(CLIP_CATS[c].title, x, y);
+        for (int i = first; i < last; i++) {
+            int k = i - first;
+            Rectangle cell = { x + (k % cols) * (cs + gap), y + (k / cols) * (cs + gap), cs, cs };
+            if (cell.y > GetScreenHeight() || cell.y + cell.height < TOPBAR_H) continue;
+            bool hover = ui_hover(cell);
+            DrawRectangleRounded(cell, 0.18f, 6, hover ? COL_ACCENT_LT : COL_HOVER);
+            Texture2D t = clip_thumb(i, &budget);
+            if (t.id) {
+                float s = (cs - 12) / fmaxf(t.width, t.height);
+                Rectangle dst = { cell.x + (cs - t.width * s) / 2, cell.y + (cs - t.height * s) / 2, t.width * s, t.height * s };
+                DrawTexturePro(t, (Rectangle){ 0, 0, (float)t.width, (float)t.height }, dst, (Vector2){ 0 }, 0, WHITE);
+            }
+            if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) add_clip(i);
+        }
+        y += ((last - first + cols - 1) / cols) * (cs + gap) + 12;
+    }
+    ui_text("Dibujos: Twemoji (CC BY 4.0).", x, y, 13, COL_MUTED);
+    return y + 30;
+}
+
 static float panel_text(float x, float y, float w)
 {
     struct { const char *label; int font; float size; float factor; } adds[] = {
@@ -1715,6 +1837,7 @@ static void draw_panel(void)
     case PANEL_DESIGN: yEnd = panel_design(x, y0, w); break;
     case PANEL_TEMPLATES: yEnd = panel_templates(x, y0, w); break;
     case PANEL_ELEMENTS: yEnd = panel_elements(x, y0, w); break;
+    case PANEL_CLIPART: yEnd = panel_clipart(x, y0, w); break;
     case PANEL_TEXT: yEnd = panel_text(x, y0, w); break;
     case PANEL_IMAGES: yEnd = panel_images(x, y0, w); break;
     case PANEL_LAYERS: yEnd = panel_layers(x, y0, w); break;
@@ -2018,7 +2141,15 @@ static void test_step(const char *dir, int frame)
         snprintf(p, sizeof(p), "%s/con_fuente.lienzo", dir); save_to(p);
         break;
     }
-    case 172: A.quit = true; break;
+    case 172: new_document(1080, 1080); A.panel = PANEL_CLIPART; A.panelOpen = true; A.panelScroll = 0; break;
+    case 190: clipart_init(); add_clip(0); add_clip(4); A.doc.el[1].x += 250; A.doc.el[1].rotation = 15; break;
+    case 192: {
+        const char *svg = getenv("LIENZO_TEST_SVG");
+        if (svg) { int id = asset_load_file(svg); if (id >= 0) add_image_asset(id, (Vector2){ 300, 800 }); }
+        break;
+    }
+    case 200: test_shot(dir, "12_dibujos"); break;
+    case 201: A.quit = true; break;
     }
 }
 

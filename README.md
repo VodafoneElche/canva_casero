@@ -18,6 +18,8 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 - **Efectos de texto**: sombra, contorno, relieve 3D, grabado y neón, con color e intensidad.
 - **Formas**: rectángulo (también con esquinas redondeadas), círculo, triángulo, estrella,
   corazón, línea y flecha. Con relleno, borde y transparencia.
+- **Dibujos**: 140 dibujos de colores en 10 temas (fiestas, amor, animales, comida, Navidad...).
+  También se pueden abrir archivos **SVG** propios, por ejemplo los de vector4free.com.
 - **Imágenes**: desde el ordenador, arrastrándolas a la ventana o pegándolas con Ctrl+V.
   Se guardan dentro del diseño, así que un `.lienzo` se puede pasar a otro ordenador.
 - **Mover, cambiar de tamaño y girar** con el ratón. Imán para centrar en el lienzo.
@@ -31,7 +33,7 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 1. Entra en la pestaña **Actions** del repositorio, abre la última ejecución correcta de
    "Compilar" y descarga `LienzoCasero-instalador-windows`.
    (Cuando se publique una versión, también estará en **Releases**.)
-2. Descomprime el zip y ejecuta `LienzoCasero-0.2.0-instalador.exe`.
+2. Descomprime el zip y ejecuta `LienzoCasero-0.3.0-instalador.exe`.
 3. Windows puede avisar con "Windows protegió su PC" porque el programa no está firmado:
    pulsa **Más información** y luego **Ejecutar de todas formas**.
 
@@ -104,4 +106,6 @@ cmake -B build && cmake --build build && ./build/LienzoCasero
 ## Licencias de terceros
 
 - raylib: licencia zlib/libpng.
+- nanosvg (lectura de SVG): licencia zlib.
+- Dibujos: Twemoji, CC BY 4.0 (ver `assets/dibujos/LEEME.md`).
 - Fuentes incluidas: SIL Open Font License 1.1 y Apache 2.0 (ver `assets/fonts/LEEME.md`).
