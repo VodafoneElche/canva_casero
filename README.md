@@ -11,7 +11,11 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 
 - **Plantillas**: 6 de ejemplo (cumpleaños, invitación, Navidad, lista de la compra,
   menú semanal, nota para la nevera) y las tuyas propias con "Guardar plantilla".
-- **Textos** con 8 tipos de letra, tamaño, color y alineación. Doble clic para escribir.
+- **Textos** con tamaño, color y alineación. Doble clic para escribir.
+- **Fuentes**: 25 gratuitas incluidas (Lobster, Pacifico, Bungee, Bebas Neue, Playfair...),
+  las de Windows y las que tú añadas (.ttf u .otf de fonts.google.com, dafont.com...).
+  Una fuente añadida viaja dentro del diseño: al abrirlo en otro ordenador se instala sola.
+- **Efectos de texto**: sombra, contorno, relieve 3D, grabado y neón, con color e intensidad.
 - **Formas**: rectángulo (también con esquinas redondeadas), círculo, triángulo, estrella,
   corazón, línea y flecha. Con relleno, borde y transparencia.
 - **Imágenes**: desde el ordenador, arrastrándolas a la ventana o pegándolas con Ctrl+V.
@@ -27,7 +31,7 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 1. Entra en la pestaña **Actions** del repositorio, abre la última ejecución correcta de
    "Compilar" y descarga `LienzoCasero-instalador-windows`.
    (Cuando se publique una versión, también estará en **Releases**.)
-2. Descomprime el zip y ejecuta `LienzoCasero-0.1.0-instalador.exe`.
+2. Descomprime el zip y ejecuta `LienzoCasero-0.2.0-instalador.exe`.
 3. Windows puede avisar con "Windows protegió su PC" porque el programa no está firmado:
    pulsa **Más información** y luego **Ejecutar de todas formas**.
 
@@ -100,4 +104,4 @@ cmake -B build && cmake --build build && ./build/LienzoCasero
 ## Licencias de terceros
 
 - raylib: licencia zlib/libpng.
-- Los tipos de letra son los que ya trae Windows; el programa no incluye ninguno.
+- Fuentes incluidas: SIL Open Font License 1.1 y Apache 2.0 (ver `assets/fonts/LEEME.md`).

@@ -25,6 +25,9 @@ typedef enum {
 
 typedef enum { ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT } TextAlign;
 
+// Efectos de texto
+typedef enum { FX_NONE, FX_SHADOW, FX_OUTLINE, FX_RELIEF, FX_EMBOSS, FX_NEON, FX_COUNT } TextEffect;
+
 typedef struct {
     int type;
     float x, y, w, h;      // caja sin girar (esquina superior izquierda y tamaño)
@@ -37,6 +40,9 @@ typedef struct {
     int font;              // índice de fuente (textos)
     float fontSize;
     int align;
+    int effect;            // TextEffect
+    Color effectColor;
+    float effectAmount;    // 0..1
     int asset;             // índice de imagen (imágenes)
     bool visible;
     bool locked;
@@ -74,6 +80,8 @@ int doc_duplicate(Document *d, int index); // devuelve el nuevo índice
 int doc_move_layer(Document *d, int index, int delta); // devuelve nuevo índice
 Element element_default(int type);
 const char *element_type_name(int type);
+const char *effect_name(int fx);
+Color effect_default_color(const Element *e, int fx);
 Rectangle element_bounds(const Element *e); // caja exterior ya girada
 
 // ---- Deshacer / rehacer ----

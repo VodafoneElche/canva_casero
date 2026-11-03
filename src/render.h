@@ -3,21 +3,35 @@
 
 #include "doc.h"
 
-#define FONT_COUNT 8
+#define MAX_FONTS 200
 #define FONT_BASE_SIZE 128
 
+typedef enum { FONT_GROUP_SYSTEM, FONT_GROUP_BUNDLED, FONT_GROUP_USER } FontGroup;
+
 typedef struct {
-    const char *name;
+    char name[64];
+    char path[1400];
+    int group;
+    bool loaded, failed;
     Font font;
 } FontEntry;
 
-extern FontEntry g_fonts[FONT_COUNT];
+extern FontEntry g_fonts[MAX_FONTS];
+extern int g_fontCount;
 extern Font g_uiFont;
 extern Font g_uiFontBold;
 
 void fonts_load(void);
 void fonts_unload(void);
-Font font_get(int index);
+Font font_get(int index);              // se carga la primera vez
+const char *font_name(int index);
+int font_find(const char *name);       // -1 si no está
+int font_install_file(const char *path);                                 // .ttf / .otf del ordenador
+int font_install_data(const char *name, const char *ext, const unsigned char *data, int size);
+const char *fonts_user_dir(void);
+// Para las listas: carga como mucho 2 fuentes nuevas por fotograma (el resto, en los siguientes)
+Font font_get_preview(int index);
+void fonts_new_frame(void);
 
 // Dibuja un elemento / todo el documento en coordenadas del documento.
 void render_element(const Element *e);

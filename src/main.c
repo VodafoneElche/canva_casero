@@ -25,10 +25,10 @@ extern void glfwSetWindowShouldClose(void *window, int value);
 #define BOTTOM_H 40
 
 typedef enum { PANEL_DESIGN, PANEL_TEMPLATES, PANEL_ELEMENTS, PANEL_TEXT, PANEL_IMAGES, PANEL_LAYERS, PANEL_COUNT } PanelId;
-typedef enum { POP_NONE, POP_FILE, POP_EXPORT, POP_COLOR, POP_FONT } PopupId;
+typedef enum { POP_NONE, POP_FILE, POP_EXPORT, POP_COLOR, POP_FONT, POP_EFFECT } PopupId;
 typedef enum { MODAL_NONE, MODAL_NEW, MODAL_SAVE_TEMPLATE } ModalId;
 typedef enum { DRAG_NONE, DRAG_MOVE, DRAG_RESIZE, DRAG_ROTATE, DRAG_PAN } DragMode;
-typedef enum { COLOR_FILL, COLOR_STROKE, COLOR_BG } ColorTarget;
+typedef enum { COLOR_FILL, COLOR_STROKE, COLOR_BG, COLOR_EFFECT } ColorTarget;
 
 typedef struct { const char *name; int w, h; } SizePreset;
 static const SizePreset PRESETS[] = {
@@ -75,6 +75,7 @@ static struct {
     bool colorPushed;
     float hue, sat, val;
     int colorDrag; // 0 nada, 1 cuadro, 2 tono
+    float fontScroll;
 
     DragMode drag;
     int handle;
@@ -374,6 +375,19 @@ static void cmd_upload_image(void)
     int id = asset_load_file(p);
     if (id < 0) { plat_message(APP_NAME, "No se ha podido leer esa imagen. Prueba con una foto PNG o JPG."); return; }
     add_image_asset(id, doc_center());
+}
+
+static void cmd_add_font(void)
+{
+    const char *p = plat_open_dialog("Añadir una fuente", FILE_KIND_FONT);
+    if (!p) return;
+    int idx = font_install_file(p);
+    if (idx < 0) { plat_message(APP_NAME, "No se ha podido usar ese archivo. Tiene que ser una fuente .ttf o .otf."); return; }
+    char msg[200];
+    snprintf(msg, sizeof(msg), "Fuente añadida: %s", font_name(idx));
+    toast(msg);
+    Element *e = selected();
+    if (e && e->type == EL_TEXT) { begin_change(); e->font = idx; fix_text_height(e); }
 }
 
 static void cmd_delete(void)
@@ -953,6 +967,7 @@ static Color *color_target_ptr(void)
     Element *e = selected();
     if (A.colorTarget == COLOR_BG) return &A.doc.bg;
     if (!e) return NULL;
+    if (A.colorTarget == COLOR_EFFECT) return &e->effectColor;
     return A.colorTarget == COLOR_FILL ? &e->fill : &e->stroke;
 }
 
@@ -1041,13 +1056,37 @@ static void draw_popup(void)
         if (h2 && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) { A.popup = POP_NONE; cmd_export(true); }
     } else if (A.popup == POP_FONT) {
         Element *e = selected();
-        r = popup_place(A.popupAnchor, 260, FONT_COUNT * 44 + 16);
+        float rowH = 42;
+        float maxH = GetScreenHeight() - (A.popupAnchor.y + A.popupAnchor.height) - 24;
+        float contentH = 0;
+        int lastGroup = -1;
+        for (int i = 0; i < g_fontCount; i++) {
+            if (g_fonts[i].group != lastGroup) { contentH += 30; lastGroup = g_fonts[i].group; }
+            contentH += rowH;
+        }
+        float h = fminf(contentH + 16, maxH);
+        r = popup_place(A.popupAnchor, 280, h);
         popup_card(r);
-        for (int i = 0; i < FONT_COUNT; i++) {
-            Rectangle it = { r.x + 8, r.y + 8 + i * 44, r.width - 16, 42 };
+        if (CheckCollisionPointRec(GetMousePosition(), r)) A.fontScroll -= GetMouseWheelMove() * 60;
+        A.fontScroll = Clamp(A.fontScroll, 0, fmaxf(0, contentH + 16 - h));
+        ui_set_clip((Rectangle){ r.x, r.y + 6, r.width, r.height - 12 });
+        BeginScissorMode((int)r.x, (int)r.y + 6, (int)r.width, (int)r.height - 12);
+        float y = r.y + 8 - A.fontScroll;
+        lastGroup = -1;
+        const char *groupNames[3] = { "De Windows", "Incluidas en el programa", "Mis fuentes" };
+        for (int i = 0; i < g_fontCount; i++) {
+            if (g_fonts[i].group != lastGroup) {
+                lastGroup = g_fonts[i].group;
+                ui_text_bold(groupNames[lastGroup], r.x + 18, y + 8, 14, COL_MUTED);
+                y += 30;
+            }
+            Rectangle it = { r.x + 8, y, r.width - 16, rowH - 2 };
+            y += rowH;
+            if (it.y + it.height < r.y || it.y > r.y + r.height) continue;
             bool hover = ui_hover(it);
-            if (hover || (e && e->font == i)) DrawRectangleRounded(it, 0.25f, 6, (e && e->font == i) ? COL_ACCENT_LT : COL_HOVER);
-            DrawTextEx(font_get(i), g_fonts[i].name, (Vector2){ it.x + 12, it.y + 7 }, 26, 0, COL_TEXT);
+            bool cur = e && e->font == i;
+            if (hover || cur) DrawRectangleRounded(it, 0.25f, 6, cur ? COL_ACCENT_LT : COL_HOVER);
+            DrawTextEx(font_get_preview(i), g_fonts[i].name, (Vector2){ it.x + 12, it.y + 7 }, 25, 0, COL_TEXT);
             if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && e) {
                 begin_change();
                 e->font = i;
@@ -1055,12 +1094,67 @@ static void draw_popup(void)
                 A.popup = POP_NONE;
             }
         }
+        EndScissorMode();
+        ui_clear_clip();
+    } else if (A.popup == POP_EFFECT) {
+        Element *e = selected();
+        if (!e || e->type != EL_TEXT) { A.popup = POP_NONE; ui_set_layer(0); return; }
+        r = popup_place(A.popupAnchor, 384, 330);
+        popup_card(r);
+        ui_text_bold("Efectos del texto", r.x + 18, r.y + 14, 18, COL_TEXT);
+        float cw = 110, chh = 82;
+        for (int fx = 0; fx < FX_COUNT; fx++) {
+            Rectangle c = { r.x + 18 + (fx % 3) * (cw + 9), r.y + 46 + (fx / 3) * (chh + 30), cw, chh };
+            bool hover = ui_hover(c);
+            bool cur = e->effect == fx;
+            Color cardBg = cur ? COL_ACCENT_LT : hover ? COL_HOVER : (Color){ 247, 248, 251, 255 };
+            if (fx == FX_NEON) cardBg = (Color){ 30, 28, 52, 255 }; // el neón luce sobre oscuro
+            DrawRectangleRounded(c, 0.15f, 6, cardBg);
+            if (cur) DrawRectangleRoundedLinesEx(c, 0.15f, 6, 2, COL_ACCENT);
+            // Muestra con la fuente y el color del texto
+            Element p = *e;
+            p.effect = fx;
+            p.effectColor = fx == e->effect ? e->effectColor : effect_default_color(e, fx);
+            if (fx == FX_NONE) p.effectColor = BLANK;
+            strcpy(p.text, "Aa");
+            p.fontSize = 44;
+            p.align = ALIGN_CENTER;
+            p.rotation = 0;
+            p.opacity = 1;
+            p.w = cw;
+            p.h = 52;
+            p.x = c.x;
+            p.y = c.y + (chh - 52) / 2 - 2;
+            if (p.fill.r > 235 && p.fill.g > 235 && p.fill.b > 235 && fx != FX_OUTLINE && fx != FX_NEON) p.fill = (Color){ 200, 200, 210, 255 };
+            render_element(&p);
+            float tw = ui_text_width(effect_name(fx), 15);
+            ui_text(effect_name(fx), c.x + (cw - tw) / 2, c.y + chh + 5, 15, COL_TEXT);
+            if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && !cur) {
+                begin_change();
+                e->effect = fx;
+                e->effectColor = effect_default_color(e, fx);
+            }
+        }
+        float y = r.y + 46 + 2 * (chh + 30) + 2;
+        bool has = e->effect != FX_NONE && e->effect != FX_EMBOSS;
+        if (has) {
+            ui_text("Color", r.x + 18, y + 6, 15, COL_MUTED);
+            Rectangle sw = { r.x + 66, y, 30, 28 };
+            if (ui_swatch(sw, e->effectColor, false)) { open_color(COLOR_EFFECT, A.popupAnchor); ui_set_layer(0); return; }
+        }
+        if (e->effect != FX_NONE) {
+            ui_text("Intensidad", r.x + 120, y + 6, 15, COL_MUTED);
+            float v = e->effectAmount;
+            int sr = ui_slider(20, (Rectangle){ r.x + 206, y + 8, r.width - 230, 12 }, &v, 0, 1);
+            if (sr == 1) begin_change();
+            if (sr) e->effectAmount = v;
+        }
     } else if (A.popup == POP_COLOR) {
         r = popup_place(A.popupAnchor, 284, 372);
         popup_card(r);
         Color *cur = color_target_ptr();
         if (!cur) { A.popup = POP_NONE; ui_set_layer(0); return; }
-        const char *title = A.colorTarget == COLOR_BG ? "Color de fondo" : A.colorTarget == COLOR_STROKE ? "Color del borde" : "Color";
+        const char *title = A.colorTarget == COLOR_BG ? "Color de fondo" : A.colorTarget == COLOR_STROKE ? "Color del borde" : A.colorTarget == COLOR_EFFECT ? "Color del efecto" : "Color";
         ui_text_bold(title, r.x + 16, r.y + 12, 18, COL_TEXT);
         float sx = r.x + 16, sy = r.y + 44, cs = 32, gap = 10;
         for (int i = 0; i < PALETTE_COUNT; i++) {
@@ -1467,14 +1561,32 @@ static float panel_text(float x, float y, float w)
         y += b.height + 10;
     }
     y += 10;
-    y = section_title("Tipos de letra", x, y);
-    for (int i = 0; i < FONT_COUNT; i++) {
-        Rectangle b = { x, y, w, 48 };
+    if (ui_button((Rectangle){ x, y, w, 42 }, "Añadir una fuente (.ttf u .otf)", BTN_NORMAL)) cmd_add_font();
+    y += 48;
+    ui_text("Hay miles gratis en fonts.google.com", x, y, 14, COL_MUTED);
+    ui_text("o dafont.com. Descárgala y añádela aquí.", x, y + 18, 14, COL_MUTED);
+    y += 48;
+    const char *groupNames[3] = { "Fuentes de Windows", "Incluidas en el programa", "Mis fuentes" };
+    int lastGroup = -1;
+    for (int i = 0; i < g_fontCount; i++) {
+        if (g_fonts[i].group != lastGroup) {
+            lastGroup = g_fonts[i].group;
+            y += 6;
+            y = section_title(groupNames[lastGroup], x, y);
+        }
+        Rectangle b = { x, y, w, 46 };
+        y += 48;
+        if (b.y > GetScreenHeight() || b.y + b.height < TOPBAR_H) continue; // fuera de la vista
         bool hover = ui_hover(b);
         if (hover) DrawRectangleRounded(b, 0.2f, 6, COL_HOVER);
-        DrawTextEx(font_get(i), g_fonts[i].name, (Vector2){ b.x + 14, b.y + 10 }, 28, 0, COL_TEXT);
+        DrawTextEx(font_get_preview(i), g_fonts[i].name, (Vector2){ b.x + 14, b.y + 9 }, 27, 0, COL_TEXT);
         if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) add_text("Tu texto aquí", i, 0.08f);
-        y += 50;
+    }
+    if (lastGroup != FONT_GROUP_USER) {
+        y += 6;
+        y = section_title(groupNames[FONT_GROUP_USER], x, y);
+        ui_text("Aún no has añadido ninguna.", x, y, 15, COL_MUTED);
+        y += 26;
     }
     y += 10;
     ui_text("Doble clic en un texto para escribir.", x, y, 15, COL_MUTED);
@@ -1701,10 +1813,10 @@ static void draw_toolbar(void)
         DrawRectangleRounded(fb, 0.25f, 6, h ? COL_HOVER : WHITE);
         DrawRectangleRoundedLinesEx(fb, 0.25f, 6, 1, COL_BORDER);
         BeginScissorMode((int)fb.x, (int)fb.y, (int)fb.width - 26, (int)fb.height);
-        DrawTextEx(font_get(e->font), g_fonts[e->font].name, (Vector2){ fb.x + 10, fb.y + 8 }, 19, 0, COL_TEXT);
+        DrawTextEx(font_get(e->font), font_name(e->font), (Vector2){ fb.x + 10, fb.y + 8 }, 19, 0, COL_TEXT);
         EndScissorMode();
         DrawTriangle((Vector2){ fb.x + fb.width - 20, fb.y + 15 }, (Vector2){ fb.x + fb.width - 15, fb.y + 21 }, (Vector2){ fb.x + fb.width - 10, fb.y + 15 }, COL_MUTED);
-        if (h && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) open_popup(POP_FONT, fb);
+        if (h && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) { A.fontScroll = 0; open_popup(POP_FONT, fb); }
         x += 180;
         // Tamaño de letra
         if (ui_button((Rectangle){ x, y + 10, 32, 36 }, "-", BTN_NORMAL)) { begin_change(); e->fontSize = fmaxf(6, roundf(e->fontSize * 0.9f)); fix_text_height(e); }
@@ -1713,6 +1825,12 @@ static void draw_toolbar(void)
         ui_text_center(sz, (Rectangle){ x + 32, y + 10, 48, 36 }, 18, COL_TEXT);
         if (ui_button((Rectangle){ x + 80, y + 10, 32, 36 }, "+", BTN_NORMAL)) { begin_change(); e->fontSize = fminf(1000, roundf(e->fontSize * 1.1f + 1)); fix_text_height(e); }
         x += 124;
+        Rectangle fxb = { x, y + 10, 86, 36 };
+        bool fxOn = e->effect != FX_NONE;
+        if (fxOn) DrawRectangleRounded(fxb, 0.25f, 6, COL_ACCENT_LT);
+        if (ui_button(fxb, "Efectos", fxOn ? BTN_GHOST : BTN_NORMAL)) open_popup(POP_EFFECT, fxb);
+        if (fxOn) ui_text_center("Efectos", fxb, 17, COL_ACCENT);
+        x += 96;
         const char *al[3] = { "Izq.", "Centro", "Der." };
         float aw[3] = { 48, 64, 48 };
         for (int i = 0; i < 3; i++) {
@@ -1799,6 +1917,11 @@ static void handle_drops(void)
             if (confirm_discard()) open_path(p);
             break;
         }
+        if (IsFileExtension(p, ".ttf;.otf;.TTF;.OTF")) {
+            int fi = font_install_file(p);
+            if (fi >= 0) { char m[200]; snprintf(m, sizeof(m), "Fuente añadida: %s", font_name(fi)); toast(m); }
+            continue;
+        }
         int id = asset_load_file(p);
         if (id >= 0) {
             add_image_asset(id, at);
@@ -1863,7 +1986,39 @@ static void test_step(const char *dir, int frame)
     case 90: test_shot(dir, "07_nuevo"); A.modal = MODAL_NONE; break;
     case 91: snprintf(p, sizeof(p), "%s/guardado.lienzo", dir); open_path(p); A.panel = PANEL_DESIGN; break;
     case 100: test_shot(dir, "08_reabierto_diseno"); break;
-    case 101: A.quit = true; break;
+    case 101: new_document(1080, 1080); A.panel = PANEL_TEXT; A.panelScroll = 380; break;
+    case 102: {
+        const char *names[] = { "Lobster", "Bungee", "Pacifico", "Bangers (cómic)", "Playfair" };
+        int fx[] = { FX_RELIEF, FX_OUTLINE, FX_SHADOW, FX_NEON, FX_EMBOSS };
+        Color cols[] = { { 255, 196, 40, 255 }, { 240, 70, 110, 255 }, { 31, 181, 166, 255 }, { 255, 255, 255, 255 }, { 200, 190, 230, 255 } };
+        A.doc.bg = (Color){ 40, 36, 70, 255 };
+        for (int i = 0; i < 5; i++) {
+            add_text(i == 3 ? "¡Neón!" : i == 0 ? "Relieve 3D" : "Lienzo Casero", font_find(names[i]) >= 0 ? font_find(names[i]) : 0, 0.11f);
+            Element *e = selected();
+            e->fill = cols[i];
+            e->effect = fx[i];
+            e->effectColor = effect_default_color(e, fx[i]);
+            e->effectAmount = 0.7f;
+            e->w = 1000; e->x = 40;
+            fix_text_height(e);
+            e->y = 40 + i * 205;
+        }
+        A.sel = 0;
+        break;
+    }
+    case 130: test_shot(dir, "09_fuentes_efectos"); break;
+    case 131: { Rectangle a = { 900, 66, 86, 36 }; open_popup(POP_EFFECT, a); break; }
+    case 140: test_shot(dir, "10_menu_efectos"); A.popup = POP_NONE; break;
+    case 141: { Rectangle a = { 560, 66, 170, 36 }; A.fontScroll = 300; open_popup(POP_FONT, a); break; }
+    case 170: test_shot(dir, "11_menu_fuentes"); A.popup = POP_NONE; break;
+    case 171: {
+        snprintf(p, sizeof(p), "%s/efectos.png", dir); export_png(&A.doc, p);
+        const char *tf = getenv("LIENZO_TEST_FONT");
+        if (tf) { int fi = font_install_file(tf); if (fi >= 0) { A.doc.el[0].font = fi; } }
+        snprintf(p, sizeof(p), "%s/con_fuente.lienzo", dir); save_to(p);
+        break;
+    }
+    case 172: A.quit = true; break;
     }
 }
 
@@ -1922,6 +2077,7 @@ int main(int argc, char **argv)
         }
 
         ui_begin_frame();
+        fonts_new_frame();
         // Ventanas emergentes: bloquean lo que hay debajo
         if (A.modal != MODAL_NONE) ui_set_blocker((Rectangle){ 0 }, true);
         else if (A.closingPopup) ui_set_blocker((Rectangle){ 0 }, true);

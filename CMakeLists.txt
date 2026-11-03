@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(LienzoCasero VERSION 0.1.0 LANGUAGES C)
+project(LienzoCasero VERSION 0.2.0 LANGUAGES C)
 if(WIN32)
     enable_language(RC)
 endif()
@@ -60,9 +60,14 @@ if(NOT MSVC)
     target_compile_options(LienzoCasero PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
 endif()
 
+# Copiar las fuentes incluidas junto al programa (carpeta "fuentes")
+add_custom_command(TARGET LienzoCasero POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/fonts $<TARGET_FILE_DIR:LienzoCasero>/fuentes)
+
 option(LIENZO_TESTS "Compilar el modo de pruebas automáticas" OFF)
 if(LIENZO_TESTS)
     target_compile_definitions(LienzoCasero PRIVATE LIENZO_TESTS)
 endif()
 
 install(TARGETS LienzoCasero RUNTIME DESTINATION .)
+install(DIRECTORY assets/fonts/ DESTINATION fuentes)

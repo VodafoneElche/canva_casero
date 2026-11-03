@@ -40,6 +40,9 @@ static const wchar_t *filter_for(FileKind kind, const wchar_t **defExt)
     case FILE_KIND_PDF:
         *defExt = L"pdf";
         return L"Documento PDF (*.pdf)\0*.pdf\0";
+    case FILE_KIND_FONT:
+        *defExt = L"ttf";
+        return L"Fuentes (*.ttf, *.otf)\0*.ttf;*.otf\0";
     }
     *defExt = NULL;
     return L"Todos los archivos\0*.*\0";
@@ -227,6 +230,7 @@ static const char *zenity_filter(FileKind kind)
     case FILE_KIND_DESIGN: return "--file-filter='Diseños | *.lienzo'";
     case FILE_KIND_PNG: return "--file-filter='PNG | *.png'";
     case FILE_KIND_PDF: return "--file-filter='PDF | *.pdf'";
+    case FILE_KIND_FONT: return "--file-filter='Fuentes | *.ttf *.otf'";
     }
     return "";
 }

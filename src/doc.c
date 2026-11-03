@@ -1,5 +1,6 @@
 #include "doc.h"
 #include "platform.h"
+#include "render.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -103,6 +104,33 @@ const char *element_type_name(int type)
     return "Elemento";
 }
 
+const char *effect_name(int fx)
+{
+    switch (fx) {
+    case FX_NONE: return "Ninguno";
+    case FX_SHADOW: return "Sombra";
+    case FX_OUTLINE: return "Contorno";
+    case FX_RELIEF: return "Relieve 3D";
+    case FX_EMBOSS: return "Grabado";
+    case FX_NEON: return "Neón";
+    }
+    return "";
+}
+
+// Un color que quede bien con el color del texto
+Color effect_default_color(const Element *e, int fx)
+{
+    Color f = e->fill;
+    float lum = (0.3f * f.r + 0.59f * f.g + 0.11f * f.b) / 255.0f;
+    switch (fx) {
+    case FX_SHADOW: return (Color){ 0, 0, 0, 120 };
+    case FX_OUTLINE: return lum > 0.6f ? (Color){ 30, 30, 40, 255 } : WHITE;
+    case FX_RELIEF: return (Color){ (unsigned char)(f.r * 0.45f), (unsigned char)(f.g * 0.45f), (unsigned char)(f.b * 0.45f), 255 };
+    case FX_NEON: return lum > 0.85f ? (Color){ 0, 220, 255, 255 } : (Color){ f.r, f.g, f.b, 255 };
+    default: return (Color){ 0, 0, 0, 110 };
+    }
+}
+
 Element element_default(int type)
 {
     Element e;
@@ -118,6 +146,9 @@ Element element_default(int type)
     e.align = ALIGN_LEFT;
     e.asset = -1;
     e.visible = true;
+    e.effect = FX_NONE;
+    e.effectColor = (Color){ 0, 0, 0, 110 };
+    e.effectAmount = 0.5f;
     switch (type) {
     case EL_LINE:
     case EL_ARROW:
@@ -382,6 +413,22 @@ bool doc_save(const Document *d, const char *path)
 
     str_printf(&s, "LIENZOCASERO 1\n");
     str_printf(&s, "lienzo %d %d %d %d %d %d\n", d->w, d->h, d->bg.r, d->bg.g, d->bg.b, d->bg.a);
+    // Las fuentes que ha añadido la persona van dentro, para que el diseño se vea
+    // igual en otro ordenador. (Las de Windows y las del programa ya están en todos.)
+    bool fontDone[MAX_FONTS] = { 0 };
+    for (int i = 0; i < d->count; i++) {
+        int fi = d->el[i].font;
+        if (d->el[i].type != EL_TEXT || fi < 0 || fi >= g_fontCount || fontDone[fi]) continue;
+        fontDone[fi] = true;
+        if (g_fonts[fi].group != FONT_GROUP_USER) continue;
+        int fsize = 0;
+        unsigned char *fdata = plat_read_file(g_fonts[fi].path, &fsize);
+        if (!fdata) continue;
+        str_printf(&s, "fuentedatos %s|%s|", IsFileExtension(g_fonts[fi].path, ".otf;.OTF") ? ".otf" : ".ttf", g_fonts[fi].name);
+        b64_encode(&s, fdata, fsize);
+        str_add(&s, "\n", 1);
+        free(fdata);
+    }
     for (int i = 0; i < d->count; i++) {
         const Element *e = &d->el[i];
         int asset = (e->type == EL_IMAGE && e->asset >= 0 && e->asset < MAX_ASSETS) ? map[e->asset] : -1;
@@ -392,6 +439,8 @@ bool doc_save(const Document *d, const char *path)
                    e->strokeW, e->roundness, e->opacity, e->font, e->fontSize, e->align,
                    asset, e->visible ? 1 : 0, e->locked ? 1 : 0);
         if (e->type == EL_TEXT) {
+            str_printf(&s, "fuente %s\n", font_name(e->font));
+            str_printf(&s, "efecto %d %d %d %d %d %.3f\n", e->effect, e->effectColor.r, e->effectColor.g, e->effectColor.b, e->effectColor.a, e->effectAmount);
             str_printf(&s, "texto ");
             escape_text(&s, e->text);
             str_add(&s, "\n", 1);
@@ -446,6 +495,31 @@ bool doc_load(Document *d, const char *path)
                 e.locked = lock != 0;
                 e.text[0] = 0;
                 tmp->el[tmp->count++] = e;
+            }
+        } else if (strncmp(line, "fuentedatos ", 12) == 0) {
+            char *ext = line + 12;
+            char *bar1 = strchr(ext, '|');
+            char *bar2 = bar1 ? strchr(bar1 + 1, '|') : NULL;
+            if (bar1 && bar2) {
+                *bar1 = 0; *bar2 = 0;
+                if (font_find(bar1 + 1) < 0) {
+                    int fl = 0;
+                    unsigned char *fd = b64_decode(bar2 + 1, (int)strlen(bar2 + 1), &fl);
+                    font_install_data(bar1 + 1, ext, fd, fl);
+                    free(fd);
+                }
+            }
+        } else if (strncmp(line, "fuente ", 7) == 0 && tmp->count > 0) {
+            int fi = font_find(line + 7);
+            tmp->el[tmp->count - 1].font = fi >= 0 ? fi : 0;
+        } else if (strncmp(line, "efecto ", 7) == 0 && tmp->count > 0) {
+            Element *le = &tmp->el[tmp->count - 1];
+            int fx, r, g, b, a;
+            float amt;
+            if (sscanf(line + 7, "%d %d %d %d %d %f", &fx, &r, &g, &b, &a, &amt) == 6 && fx >= 0 && fx < FX_COUNT) {
+                le->effect = fx;
+                le->effectColor = (Color){ (unsigned char)r, (unsigned char)g, (unsigned char)b, (unsigned char)a };
+                le->effectAmount = amt;
             }
         } else if (strncmp(line, "texto ", 6) == 0 && tmp->count > 0) {
             unescape_text(tmp->el[tmp->count - 1].text, line + 6, TEXT_MAX);

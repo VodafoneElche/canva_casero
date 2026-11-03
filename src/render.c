@@ -7,16 +7,21 @@
 #include <stdlib.h>
 #include <string.h>
 
-FontEntry g_fonts[FONT_COUNT];
 Font g_uiFont;
 Font g_uiFontBold;
 
 // ------------------------------------------------------------------ Fuentes
-// Usamos las fuentes que ya trae Windows. En Linux (para pruebas) DejaVu.
+// Tres grupos: las que ya trae Windows, las que vienen con el programa
+// (carpeta "fuentes" junto al .exe) y las que añade cada persona
+// (carpeta "fuentes" dentro de %APPDATA%\LienzoCasero).
+// Se cargan la primera vez que se usan.
+
+FontEntry g_fonts[MAX_FONTS];
+int g_fontCount = 0;
 
 typedef struct { const char *name; const char *files[4]; } FontSpec;
 
-static const FontSpec FONT_SPECS[FONT_COUNT] = {
+static const FontSpec SYSTEM_FONTS[] = {
     { "Moderna",          { "C:/Windows/Fonts/segoeui.ttf",  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf" } },
     { "Moderna negrita",  { "C:/Windows/Fonts/segoeuib.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" } },
     { "Clásica",          { "C:/Windows/Fonts/georgia.ttf",  "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf" } },
@@ -25,6 +30,19 @@ static const FontSpec FONT_SPECS[FONT_COUNT] = {
     { "Titular",          { "C:/Windows/Fonts/impact.ttf",   "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" } },
     { "Manuscrita",       { "C:/Windows/Fonts/segoesc.ttf",  "C:/Windows/Fonts/segoepr.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf" } },
     { "Máquina",          { "C:/Windows/Fonts/consola.ttf",  "C:/Windows/Fonts/cour.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf" } },
+};
+
+// Nombres bonitos para las fuentes incluidas (archivo -> nombre)
+static const struct { const char *file; const char *name; } BUNDLED_NAMES[] = {
+    { "Poppins-Regular.ttf", "Poppins" }, { "Poppins-Bold.ttf", "Poppins negrita" }, { "Poppins-Black.ttf", "Poppins gruesa" },
+    { "Montserrat.ttf", "Montserrat" }, { "PlayfairDisplay.ttf", "Playfair" }, { "AbrilFatface-Regular.ttf", "Abril Fatface" },
+    { "Cinzel.ttf", "Cinzel" }, { "Lobster-Regular.ttf", "Lobster" }, { "Pacifico-Regular.ttf", "Pacifico" },
+    { "DancingScript.ttf", "Dancing Script" }, { "GreatVibes-Regular.ttf", "Great Vibes" }, { "Satisfy-Regular.ttf", "Satisfy" },
+    { "Caveat.ttf", "Caveat" }, { "IndieFlower-Regular.ttf", "Indie Flower" }, { "PermanentMarker-Regular.ttf", "Rotulador" },
+    { "AmaticSC-Bold.ttf", "Amatic" }, { "BebasNeue-Regular.ttf", "Bebas Neue" }, { "Anton-Regular.ttf", "Anton" },
+    { "Bungee-Regular.ttf", "Bungee" }, { "Bangers-Regular.ttf", "Bangers (cómic)" }, { "LuckiestGuy-Regular.ttf", "Luckiest Guy" },
+    { "Righteous-Regular.ttf", "Righteous" }, { "Fredoka.ttf", "Fredoka" }, { "Comfortaa.ttf", "Comfortaa" },
+    { "SpecialElite-Regular.ttf", "Máquina antigua" },
 };
 
 static int g_codepoints[400];
@@ -44,7 +62,8 @@ static Font load_font_file(const char *path, int size)
     int dataSize = 0;
     unsigned char *data = plat_read_file(path, &dataSize);
     if (!data) return (Font){0};
-    Font f = LoadFontFromMemory(".ttf", data, dataSize, size, g_codepoints, g_codepointCount);
+    const char *ext = IsFileExtension(path, ".otf;.OTF") ? ".otf" : ".ttf";
+    Font f = LoadFontFromMemory(ext, data, dataSize, size, g_codepoints, g_codepointCount);
     free(data);
     return f;
 }
@@ -58,19 +77,93 @@ static Font load_first(const char *const *files, int size)
     return (Font){0};
 }
 
+int font_find(const char *name)
+{
+    for (int i = 0; i < g_fontCount; i++)
+        if (strcmp(g_fonts[i].name, name) == 0) return i;
+    return -1;
+}
+
+static int font_register(const char *name, const char *path, int group)
+{
+    if (g_fontCount >= MAX_FONTS || font_find(name) >= 0) return font_find(name);
+    FontEntry *f = &g_fonts[g_fontCount];
+    memset(f, 0, sizeof(*f));
+    strncpy(f->name, name, sizeof(f->name) - 1);
+    strncpy(f->path, path, sizeof(f->path) - 1);
+    f->group = group;
+    return g_fontCount++;
+}
+
+// "mi_fuente-Regular.ttf" -> "mi fuente"
+static void name_from_file(const char *file, char *out, int max)
+{
+    const char *base = GetFileNameWithoutExt(file);
+    int n = 0;
+    for (const char *p = base; *p && n < max - 1; p++) out[n++] = (*p == '_' || *p == '-') ? ' ' : *p;
+    out[n] = 0;
+    char *reg = strstr(out, " Regular");
+    if (reg && reg[8] == 0) *reg = 0;
+    if (!out[0]) strncpy(out, "Fuente", max - 1);
+}
+
+static int cmp_fonts(const void *a, const void *b)
+{
+    return strcmp(((const FontEntry *)a)->name, ((const FontEntry *)b)->name);
+}
+
+static void register_dir(const char *dir, int group)
+{
+    static char names[MAX_FONTS][260];
+    int start = g_fontCount;
+    const char *exts[2] = { ".ttf", ".otf" };
+    for (int e = 0; e < 2; e++) {
+        int n = plat_list_dir(dir, exts[e], names, MAX_FONTS);
+        for (int i = 0; i < n; i++) {
+            char path[1400], name[64];
+            snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+            name_from_file(names[i], name, sizeof(name));
+            for (size_t k = 0; k < sizeof(BUNDLED_NAMES) / sizeof(BUNDLED_NAMES[0]); k++)
+                if (strcmp(BUNDLED_NAMES[k].file, names[i]) == 0) strncpy(name, BUNDLED_NAMES[k].name, sizeof(name) - 1);
+            font_register(name, path, group);
+        }
+    }
+    qsort(&g_fonts[start], g_fontCount - start, sizeof(FontEntry), cmp_fonts);
+}
+
+const char *fonts_user_dir(void)
+{
+    static char dir[1100] = {0};
+    if (!dir[0]) {
+        snprintf(dir, sizeof(dir), "%s/fuentes", plat_data_dir());
+        plat_make_dir(dir);
+    }
+    return dir;
+}
+
 void fonts_load(void)
 {
     build_codepoints();
-    for (int i = 0; i < FONT_COUNT; i++) {
-        g_fonts[i].name = FONT_SPECS[i].name;
-        g_fonts[i].font = load_first(FONT_SPECS[i].files, FONT_BASE_SIZE);
-        if (g_fonts[i].font.texture.id != 0) {
-            GenTextureMipmaps(&g_fonts[i].font.texture);
-            SetTextureFilter(g_fonts[i].font.texture, TEXTURE_FILTER_TRILINEAR);
-        }
+    g_fontCount = 0;
+    // 1. Las de Windows (las primeras 8 siempre en este orden: los diseños antiguos las usan por número)
+    for (size_t i = 0; i < sizeof(SYSTEM_FONTS) / sizeof(SYSTEM_FONTS[0]); i++) {
+        const char *path = SYSTEM_FONTS[i].files[0];
+        for (int k = 0; k < 4 && SYSTEM_FONTS[i].files[k]; k++)
+            if (plat_file_exists(SYSTEM_FONTS[i].files[k])) { path = SYSTEM_FONTS[i].files[k]; break; }
+        font_register(SYSTEM_FONTS[i].name, path, FONT_GROUP_SYSTEM);
     }
-    g_uiFont = load_first(FONT_SPECS[0].files, 20);
-    g_uiFontBold = load_first(FONT_SPECS[1].files, 20);
+    // 2. Las que vienen con el programa
+    char dir[1200];
+    snprintf(dir, sizeof(dir), "%sfuentes", GetApplicationDirectory());
+    register_dir(dir, FONT_GROUP_BUNDLED);
+#if defined(LIENZO_FONTS_DIR)
+    if (g_fontCount == 8) register_dir(LIENZO_FONTS_DIR, FONT_GROUP_BUNDLED); // al compilar en desarrollo
+#endif
+    // 3. Las de cada persona
+    register_dir(fonts_user_dir(), FONT_GROUP_USER);
+
+    g_uiFont = load_first(SYSTEM_FONTS[0].files, 20);
+    g_uiFontBold = load_first(SYSTEM_FONTS[1].files, 20);
     if (g_uiFont.texture.id == 0) g_uiFont = GetFontDefault();
     if (g_uiFontBold.texture.id == 0) g_uiFontBold = g_uiFont;
     SetTextureFilter(g_uiFont.texture, TEXTURE_FILTER_BILINEAR);
@@ -79,15 +172,77 @@ void fonts_load(void)
 
 void fonts_unload(void)
 {
-    for (int i = 0; i < FONT_COUNT; i++)
-        if (g_fonts[i].font.texture.id != 0) UnloadFont(g_fonts[i].font);
+    for (int i = 0; i < g_fontCount; i++)
+        if (g_fonts[i].loaded) UnloadFont(g_fonts[i].font);
+}
+
+static bool ensure_loaded(int i)
+{
+    FontEntry *f = &g_fonts[i];
+    if (f->loaded) return true;
+    if (f->failed) return false;
+    f->font = load_font_file(f->path, FONT_BASE_SIZE);
+    if (f->font.texture.id == 0) { f->failed = true; return false; }
+    GenTextureMipmaps(&f->font.texture);
+    SetTextureFilter(f->font.texture, TEXTURE_FILTER_TRILINEAR);
+    f->loaded = true;
+    return true;
 }
 
 Font font_get(int index)
 {
-    if (index >= 0 && index < FONT_COUNT && g_fonts[index].font.texture.id != 0) return g_fonts[index].font;
-    if (g_fonts[0].font.texture.id != 0) return g_fonts[0].font;
+    if (index >= 0 && index < g_fontCount && ensure_loaded(index)) return g_fonts[index].font;
+    if (g_fontCount > 0 && ensure_loaded(0)) return g_fonts[0].font;
     return GetFontDefault();
+}
+
+static int g_previewBudget = 2;
+void fonts_new_frame(void) { g_previewBudget = 2; }
+
+Font font_get_preview(int index)
+{
+    if (index < 0 || index >= g_fontCount) return g_uiFont;
+    if (g_fonts[index].loaded) return g_fonts[index].font;
+    if (g_fonts[index].failed || g_previewBudget <= 0) return g_uiFont;
+    g_previewBudget--;
+    return ensure_loaded(index) ? g_fonts[index].font : g_uiFont;
+}
+
+const char *font_name(int index)
+{
+    if (index >= 0 && index < g_fontCount) return g_fonts[index].name;
+    return g_fontCount > 0 ? g_fonts[0].name : "";
+}
+
+// Copia una fuente a la carpeta del usuario y la añade a la lista
+int font_install_file(const char *path)
+{
+    int size = 0;
+    unsigned char *data = plat_read_file(path, &size);
+    if (!data) return -1;
+    char name[64];
+    name_from_file(GetFileName(path), name, sizeof(name));
+    int idx = font_install_data(name, IsFileExtension(path, ".otf;.OTF") ? ".otf" : ".ttf", data, size);
+    free(data);
+    return idx;
+}
+
+int font_install_data(const char *name, const char *ext, const unsigned char *data, int size)
+{
+    int existing = font_find(name);
+    if (existing >= 0) return existing;
+    // Comprobar que es una fuente válida antes de guardarla
+    Font test = LoadFontFromMemory(ext, data, size, 16, NULL, 95);
+    if (test.texture.id == 0) return -1;
+    UnloadFont(test);
+    char safe[64];
+    int n = 0;
+    for (const char *p = name; *p && n < 63; p++) safe[n++] = strchr("\\/:*?\"<>|", *p) ? '_' : *p;
+    safe[n] = 0;
+    char dst[1400];
+    snprintf(dst, sizeof(dst), "%s/%s%s", fonts_user_dir(), safe, ext);
+    if (!plat_write_file(dst, data, size)) return -1;
+    return font_register(name, dst, FONT_GROUP_USER);
 }
 
 // ------------------------------------------------------------------ Ayudas de dibujo
@@ -263,20 +418,97 @@ Vector2 text_caret_pos(const Element *e, int byteIndex, float *lineH)
     return (Vector2){ line_x(e, 0), -e->h / 2 };
 }
 
-static void draw_text_element(const Element *e, Color col)
+// Dibuja todas las líneas del texto desplazadas (dx, dy)
+static void draw_text_lines(const Element *e, const TextLine *lines, int n, Font f, float dx, float dy, Color col)
 {
-    TextLine lines[200];
-    int n = layout_text(e, lines, 200);
-    Font f = font_get(e->font);
     float size = e->fontSize;
     for (int i = 0; i < n; i++) {
         char tmp[TEXT_MAX];
         int l = lines[i].end - lines[i].start;
         memcpy(tmp, e->text + lines[i].start, l);
         tmp[l] = 0;
-        Vector2 pos = { line_x(e, lines[i].width), -e->h / 2 + i * size * LINE_SPACING + size * (LINE_SPACING - 1) / 2 };
+        Vector2 pos = { line_x(e, lines[i].width) + dx, -e->h / 2 + i * size * LINE_SPACING + size * (LINE_SPACING - 1) / 2 + dy };
         DrawTextEx(f, tmp, pos, size, size * 0.02f, col);
     }
+}
+
+static void draw_text_element(const Element *e, Color col)
+{
+    TextLine lines[200];
+    int n = layout_text(e, lines, 200);
+    Font f = font_get(e->font);
+    float size = e->fontSize;
+    float amt = e->effectAmount < 0 ? 0 : e->effectAmount > 1 ? 1 : e->effectAmount;
+    Color fx = with_opacity(e->effectColor, e->opacity);
+
+    switch (e->effect) {
+    case FX_SHADOW: {
+        // Sombra suave: varias copias desplazadas y transparentes
+        float d = 2 + size * 0.10f * amt;
+        float blur = 1 + size * 0.035f * amt;
+        Color c = fx;
+        c.a = (unsigned char)(fx.a / 5);
+        for (int k = 0; k < 8; k++) {
+            float a = k * PI / 4;
+            draw_text_lines(e, lines, n, f, d + cosf(a) * blur, d + sinf(a) * blur, c);
+        }
+        Color core = fx;
+        core.a = (unsigned char)(fx.a * 0.6f);
+        draw_text_lines(e, lines, n, f, d, d, core);
+        break;
+    }
+    case FX_OUTLINE: {
+        float r = 1 + size * 0.09f * amt;
+        int steps = 24;
+        for (int k = 0; k < steps; k++) {
+            float a = k * 2 * PI / steps;
+            draw_text_lines(e, lines, n, f, cosf(a) * r, sinf(a) * r, fx);
+            draw_text_lines(e, lines, n, f, cosf(a) * r * 0.5f, sinf(a) * r * 0.5f, fx);
+        }
+        break;
+    }
+    case FX_RELIEF: {
+        // Copias apiladas hacia abajo a la derecha: parece que las letras salen del papel
+        float depth = 2 + size * 0.14f * amt;
+        int steps = (int)ceilf(depth);
+        if (steps > 80) steps = 80;
+        for (int k = steps; k >= 1; k--) {
+            float t = (float)k / steps;
+            Color c = fx;
+            float shade = 1.0f - 0.35f * t; // más oscuro cuanto más al fondo
+            c.r = (unsigned char)(c.r * shade); c.g = (unsigned char)(c.g * shade); c.b = (unsigned char)(c.b * shade);
+            draw_text_lines(e, lines, n, f, depth * t * 0.7f, depth * t, c);
+        }
+        // Sombra en el suelo
+        Color sh = { 0, 0, 0, (unsigned char)(50 * e->opacity) };
+        draw_text_lines(e, lines, n, f, depth * 0.9f, depth * 1.3f, sh);
+        break;
+    }
+    case FX_EMBOSS: {
+        float d = 1 + size * 0.035f * amt;
+        Color light = with_opacity((Color){ 255, 255, 255, 200 }, e->opacity);
+        Color dark = with_opacity((Color){ 0, 0, 0, 140 }, e->opacity);
+        draw_text_lines(e, lines, n, f, -d, -d, light);
+        draw_text_lines(e, lines, n, f, d, d, dark);
+        break;
+    }
+    case FX_NEON: {
+        float r = 2 + size * 0.22f * amt;
+        for (int ring = 3; ring >= 1; ring--) {
+            float rr = r * ring / 3.0f;
+            Color c = fx;
+            c.a = (unsigned char)(fx.a * 0.07f * (4 - ring));
+            for (int k = 0; k < 16; k++) {
+                float a = k * 2 * PI / 16;
+                draw_text_lines(e, lines, n, f, cosf(a) * rr, sinf(a) * rr, c);
+            }
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    draw_text_lines(e, lines, n, f, 0, 0, col);
 }
 
 // ------------------------------------------------------------------ Elementos

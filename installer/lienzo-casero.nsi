@@ -6,7 +6,7 @@ Unicode true
 !include "x64.nsh"
 
 !ifndef VERSION
-  !define VERSION "0.1.0"
+  !define VERSION "0.2.0"
 !endif
 !ifndef EXE
   !define EXE "..\build\LienzoCasero.exe"
@@ -68,6 +68,13 @@ Section "Programa" SecMain
   SetOutPath "$INSTDIR"
   File "/oname=LienzoCasero.exe" "${EXE}"
   File "/oname=icono.ico" "..\assets\icon.ico"
+  ; Fuentes gratuitas que vienen con el programa
+  SetOutPath "$INSTDIR\fuentes"
+  File "..\assets\fonts\*.ttf"
+  File "..\assets\fonts\OFL.txt"
+  File "..\assets\fonts\LICENSE-Apache.txt"
+  File "..\assets\fonts\LEEME.md"
+  SetOutPath "$INSTDIR"
 
   ; Accesos directos (para todos los usuarios del ordenador)
   SetShellVarContext all
@@ -103,6 +110,7 @@ Section "Uninstall"
   Delete "$INSTDIR\LienzoCasero.exe"
   Delete "$INSTDIR\icono.ico"
   Delete "$INSTDIR\Desinstalar.exe"
+  RMDir /r "$INSTDIR\fuentes"
   RMDir "$INSTDIR"
   DeleteRegKey HKLM "Software\Classes\LienzoCasero.Diseno"
   ReadRegStr $0 HKLM "Software\Classes\.lienzo" ""

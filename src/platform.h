@@ -10,7 +10,8 @@ typedef enum {
     FILE_KIND_IMAGE,    // png, jpg...
     FILE_KIND_DESIGN,   // .lienzo
     FILE_KIND_PNG,
-    FILE_KIND_PDF
+    FILE_KIND_PDF,
+    FILE_KIND_FONT      // .ttf / .otf
 } FileKind;
 
 // Devuelven NULL si el usuario cancela. La cadena es estática (copiarla si hace falta).
