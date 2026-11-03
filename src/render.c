@@ -221,9 +221,21 @@ void fonts_load(void)
     // 3. Las de cada persona
     register_dir(fonts_user_dir(), FONT_GROUP_USER);
 
-    g_uiFont = load_first(SYSTEM_FONTS[0].files, 20);
-    g_uiFontBold = load_first(SYSTEM_FONTS[1].files, 20);
-    if (g_uiFont.texture.id == 0) g_uiFont = GetFontDefault();
+    fonts_reload_ui(20);
+}
+
+// Letra de los menús. Con el programa más grande se carga a más tamaño para que no se vea borrosa.
+void fonts_reload_ui(int px)
+{
+    static int loadedPx = 0;
+    if (px == loadedPx) return;
+    Font def = GetFontDefault();
+    if (g_uiFontBold.texture.id && g_uiFontBold.texture.id != g_uiFont.texture.id && g_uiFontBold.texture.id != def.texture.id) UnloadFont(g_uiFontBold);
+    if (g_uiFont.texture.id && g_uiFont.texture.id != def.texture.id) UnloadFont(g_uiFont);
+    loadedPx = px;
+    g_uiFont = load_first(SYSTEM_FONTS[0].files, px);
+    g_uiFontBold = load_first(SYSTEM_FONTS[1].files, px);
+    if (g_uiFont.texture.id == 0) g_uiFont = def;
     if (g_uiFontBold.texture.id == 0) g_uiFontBold = g_uiFont;
     SetTextureFilter(g_uiFont.texture, TEXTURE_FILTER_BILINEAR);
     SetTextureFilter(g_uiFontBold.texture, TEXTURE_FILTER_BILINEAR);
@@ -664,6 +676,7 @@ Image render_to_image(const Document *d, float scale)
     int ss = 2;
     if (w * ss > 8192 || h * ss > 8192) ss = 1;
     RenderTexture2D rt = LoadRenderTexture(w * ss, h * ss);
+    rlPushMatrix();   // guarda la lupa de la pantalla (se pierde al dibujar en la textura)
     BeginTextureMode(rt);
     ClearBackground(BLANK);
     rlPushMatrix();
@@ -676,6 +689,7 @@ Image render_to_image(const Document *d, float scale)
     EndBlendMode();
     rlPopMatrix();
     EndTextureMode();
+    rlPopMatrix();
     Image img = LoadImageFromTexture(rt.texture);
     UnloadRenderTexture(rt);
     ImageFlipVertical(&img);

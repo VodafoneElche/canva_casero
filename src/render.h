@@ -23,6 +23,7 @@ extern Font g_uiFontBold;
 
 void fonts_load(void);
 void fonts_unload(void);
+void fonts_reload_ui(int px);
 Font font_get(int index);              // se carga la primera vez
 const char *font_name(int index);
 int font_find(const char *name);       // -1 si no está
