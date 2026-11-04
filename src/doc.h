@@ -20,8 +20,24 @@ typedef enum {
     EL_ARROW,
     EL_TEXT,
     EL_IMAGE,
+    // Desde la 0.11 (van al final para que los diseños antiguos sigan valiendo)
+    EL_PENTAGON,
+    EL_HEXAGON,
+    EL_OCTAGON,
+    EL_DIAMOND,
+    EL_CROSS,
+    EL_BLOCKARROW,
+    EL_BUBBLE,
+    EL_CURVE,       // línea curva: la altura de la caja es lo que se dobla
+    EL_PATH,        // a mano alzada: los puntos van en "text" ("x,y x,y ...", de 0 a 1000)
     EL_TYPE_COUNT
 } ElementType;
+
+// Formas rellenas (con relleno y borde)
+#define IS_SHAPE(t) ((t) == EL_RECT || (t) == EL_ELLIPSE || (t) == EL_TRIANGLE || (t) == EL_STAR || (t) == EL_HEART || \
+                     ((t) >= EL_PENTAGON && (t) <= EL_BUBBLE))
+// Líneas (solo color y grosor)
+#define IS_LINE(t) ((t) == EL_LINE || (t) == EL_ARROW || (t) == EL_CURVE || (t) == EL_PATH)
 
 typedef enum { ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT } TextAlign;
 
@@ -47,6 +63,7 @@ typedef struct {
     float letterSpacing;   // espacio de más entre letras / tamaño (0 = normal)
     int asset;             // índice de imagen (imágenes)
     bool tint;             // imagen de un solo color: se pinta con 'fill' (partes de SVG)
+    int lineStyle;         // 0 = continua, 1 = discontinua, 2 = de puntos (líneas y bordes)
     bool visible;
     bool locked;
     char text[TEXT_MAX];

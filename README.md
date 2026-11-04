@@ -17,7 +17,11 @@ sin internet en **Windows 10 y 11 (64 bits)**.
   Una fuente añadida viaja dentro del diseño: al abrirlo en otro ordenador se instala sola.
 - **Efectos de texto**: sombra, contorno, relieve 3D, grabado y neón, con color e intensidad.
 - **Formas**: rectángulo (también con esquinas redondeadas), círculo, triángulo, estrella,
-  corazón, línea y flecha. Con relleno, borde y transparencia.
+  corazón, pentágono, hexágono, octógono, rombo, cruz, flecha gruesa y bocadillo.
+  Con relleno, borde (continuo, discontinuo o de puntos), transparencia, sombra y **relieve 3D**.
+- **Líneas**: recta, discontinua, de puntos, flecha, **curva** y **a mano alzada** (botón "A mano":
+  arrastra el ratón sobre el lienzo para dibujar; Esc o "Terminar" para acabar).
+- **Color de fondo**: paleta completa y selector libre de color, igual que en el texto.
 - **Dibujos**: 140 dibujos de colores en 10 temas (fiestas, amor, animales, comida, Navidad...).
   También se pueden abrir dibujos **SVG**, **EPS** y **AI** propios, por ejemplo los de vector4free.com o vecteezy.com.
   Al abrir un SVG puedes elegir: **entero**, **por partes** (cada bloque del dibujo es una
@@ -45,7 +49,7 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 
 1. Descarga el instalador de la última versión en
    [Releases](https://github.com/VodafoneElche/canva_casero/releases/latest).
-2. Ejecuta `LienzoCasero-0.10.0-instalador.exe`.
+2. Ejecuta `LienzoCasero-0.11.0-instalador.exe`.
 3. Windows puede avisar con "Windows protegió su PC" porque el programa no está firmado:
    pulsa **Más información** y luego **Ejecutar de todas formas**.
 

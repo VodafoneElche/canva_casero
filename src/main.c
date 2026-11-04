@@ -34,7 +34,7 @@ typedef enum { PANEL_DESIGN, PANEL_TEMPLATES, PANEL_ELEMENTS, PANEL_CLIPART, PAN
 typedef enum { POP_NONE, POP_FILE, POP_EXPORT, POP_COLOR, POP_FONT, POP_EFFECT } PopupId;
 typedef enum { MODAL_NONE, MODAL_NEW, MODAL_SAVE_TEMPLATE, MODAL_SVG } ModalId;
 typedef enum { DRAG_NONE, DRAG_MOVE, DRAG_RESIZE, DRAG_ROTATE, DRAG_PAN } DragMode;
-typedef enum { COLOR_FILL, COLOR_STROKE, COLOR_BG, COLOR_EFFECT } ColorTarget;
+typedef enum { COLOR_FILL, COLOR_STROKE, COLOR_BG, COLOR_EFFECT, COLOR_PEN } ColorTarget;
 
 typedef struct { const char *name; int w, h; } SizePreset;
 static const SizePreset PRESETS[] = {
@@ -107,6 +107,7 @@ static struct {
     char templateName[128];
     bool wand;              // lápiz mágico activo
     bool fixText;           // corregir un texto de una imagen
+    bool penMode;           // dibujando a mano alzada
     bool ocrMode;           // textos de la imagen ya leídos y marcados para tocarlos
     int ocrElem, ocrAsset;  // imagen a la que pertenecen
     int ocrPending;         // frames que faltan para leer (así antes se ve el aviso)
@@ -221,6 +222,7 @@ static void stop_editing(void)
 static void select_index(int i)
 {
     if (i != A.sel) { stop_editing(); A.wand = false; A.fixText = false; A.boxDrag = false; }
+    if (i >= 0) A.penMode = false;
     A.sel = i;
     multi_clear();
 }
@@ -372,6 +374,9 @@ static void add_shape(int type)
     e->w = s;
     e->h = (type == EL_LINE || type == EL_ARROW) ? fmaxf(20, s * 0.12f) : s;
     if (type == EL_LINE || type == EL_ARROW) { e->w = s * 1.4f; e->strokeW = fmaxf(4, s * 0.03f); }
+    if (type == EL_CURVE) { e->w = s * 1.4f; e->h = s * 0.45f; e->strokeW = fmaxf(4, s * 0.03f); }
+    if (type == EL_BLOCKARROW) { e->w = s * 1.3f; e->h = s * 0.7f; }
+    if (type == EL_BUBBLE) { e->w = s * 1.3f; e->h = s; e->strokeW = fmaxf(3, s * 0.02f); }
     Vector2 c = doc_center();
     e->x = c.x - e->w / 2;
     e->y = c.y - e->h / 2;
@@ -808,6 +813,7 @@ static bool hit_element(const Element *e, Vector2 w, float pad)
     Vector2 l = to_local(e, w);
     float hh = e->h / 2;
     if (e->type == EL_LINE || e->type == EL_ARROW) hh = fmaxf(hh, pad * 2);
+    if (e->type == EL_PATH || e->type == EL_CURVE) pad += e->strokeW / 2;
     return fabsf(l.x) <= e->w / 2 + pad && fabsf(l.y) <= hh + pad;
 }
 
@@ -2088,6 +2094,112 @@ static void ocr_draw(void)
     }
 }
 
+// ------------------------------------------------------------------ Dibujar a mano alzada
+
+#define PEN_MAX 4000
+static Vector2 g_pen[PEN_MAX];
+static int g_penN;
+static bool g_penDown;
+static Color g_penColor = { 40, 40, 50, 255 };
+static float g_penWidth = 0;   // 0 = según el tamaño del lienzo
+
+static void start_pen(void)
+{
+    if (A.penMode) { A.penMode = false; return; }
+    select_index(-1);
+    A.penMode = true;
+    A.ocrMode = false;
+    if (g_penWidth <= 0) g_penWidth = fmaxf(3, fminf(A.doc.w, A.doc.h) * 0.008f);
+    toast("Arrastra el ratón sobre el lienzo para dibujar. Esc o \"Terminar\" para acabar.");
+}
+
+// Quita puntos que casi no cambian el trazo (Ramer-Douglas-Peucker)
+static void rdp(const Vector2 *p, int a, int b, float tol, bool *keep)
+{
+    if (b <= a + 1) return;
+    Vector2 d = Vector2Subtract(p[b], p[a]);
+    float len = Vector2Length(d);
+    float best = -1;
+    int bi = -1;
+    for (int i = a + 1; i < b; i++) {
+        Vector2 v = Vector2Subtract(p[i], p[a]);
+        float dist = len > 0.0001f ? fabsf(d.x * v.y - d.y * v.x) / len : Vector2Length(v);
+        if (dist > best) { best = dist; bi = i; }
+    }
+    if (best > tol) {
+        keep[bi] = true;
+        rdp(p, a, bi, tol, keep);
+        rdp(p, bi, b, tol, keep);
+    }
+}
+
+static void finish_pen_stroke(void)
+{
+    if (g_penN < 1) return;
+    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+    for (int i = 0; i < g_penN; i++) {
+        x0 = fminf(x0, g_pen[i].x); y0 = fminf(y0, g_pen[i].y);
+        x1 = fmaxf(x1, g_pen[i].x); y1 = fmaxf(y1, g_pen[i].y);
+    }
+    float pad = g_penWidth / 2;
+    x0 -= pad; y0 -= pad; x1 += pad; y1 += pad;
+    float bw = fmaxf(x1 - x0, 1), bh = fmaxf(y1 - y0, 1);
+    static bool keep[PEN_MAX];
+    char buf[TEXT_MAX];
+    // Cada vez con menos detalle hasta que quepa en el texto del elemento
+    for (float tol = 0.6f / A.cam.zoom; ; tol *= 1.5f) {
+        memset(keep, 0, sizeof(bool) * g_penN);
+        keep[0] = keep[g_penN - 1] = true;
+        rdp(g_pen, 0, g_penN - 1, tol, keep);
+        int len = 0;
+        bool fits = true;
+        buf[0] = 0;
+        for (int i = 0; i < g_penN; i++) {
+            if (!keep[i]) continue;
+            int px = (int)roundf((g_pen[i].x - x0) / bw * 1000), py = (int)roundf((g_pen[i].y - y0) / bh * 1000);
+            int w = snprintf(buf + len, sizeof(buf) - len, "%d,%d ", px, py);
+            if (w <= 0 || len + w >= (int)sizeof(buf) - 1) { fits = false; break; }
+            len += w;
+        }
+        if (fits) break;
+    }
+    begin_change();
+    Element *e = doc_add(&A.doc, EL_PATH);
+    if (!e) return;
+    snprintf(e->text, TEXT_MAX, "%s", buf);
+    e->x = x0; e->y = y0; e->w = bw; e->h = bh;
+    e->strokeW = g_penWidth;
+    e->fill = g_penColor;
+}
+
+// Devuelve true si el lápiz se ha quedado con el ratón
+static bool pen_input(bool over, Vector2 w)
+{
+    if (!A.penMode) return false;
+    if (g_penDown) {
+        if (g_penN < PEN_MAX && (g_penN == 0 || Vector2Distance(w, g_pen[g_penN - 1]) * A.cam.zoom > 1.5f)) g_pen[g_penN++] = w;
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) { g_penDown = false; finish_pen_stroke(); g_penN = 0; }
+        SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
+        return true;
+    }
+    if (!over) return false;
+    SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { g_penDown = true; g_penN = 0; g_pen[g_penN++] = w; }
+    return true;
+}
+
+static void pen_draw(void)
+{
+    if (!A.penMode || !g_penDown || g_penN < 1) return;
+    float t = g_penWidth * A.cam.zoom;
+    for (int i = 0; i + 1 < g_penN; i++) {
+        Vector2 a = GetWorldToScreen2D(g_pen[i], A.cam), b = GetWorldToScreen2D(g_pen[i + 1], A.cam);
+        DrawLineEx(a, b, t, g_penColor);
+        DrawCircleV(b, t / 2, g_penColor);
+    }
+    DrawCircleV(GetWorldToScreen2D(g_pen[0], A.cam), t / 2, g_penColor);
+}
+
 static void canvas_input(Rectangle cr)
 {
     Vector2 m = GetMousePosition();
@@ -2129,6 +2241,7 @@ static void canvas_input(Rectangle cr)
         return;
     }
 
+    if (pen_input(over, w)) return;
     Element *sel = selected();
     if ((A.wand || A.fixText) && (!sel || sel->type != EL_IMAGE)) { A.wand = false; A.fixText = false; A.boxDrag = false; }
     if (A.boxDrag) {
@@ -2456,6 +2569,7 @@ static void shortcuts(void)
         return;
     }
     Element *e = selected();
+    if (IsKeyPressed(KEY_ESCAPE) && A.penMode) { A.penMode = false; return; }
     if (IsKeyPressed(KEY_ESCAPE) && A.ocrMode && !A.editing) { A.ocrMode = false; return; }
     if (IsKeyPressed(KEY_ESCAPE)) { A.popup = POP_NONE; if (A.wand || A.fixText) { A.wand = false; A.fixText = false; A.boxDrag = false; } else select_index(-1); }
     if (!e) return;
@@ -2541,6 +2655,7 @@ static void draw_canvas(Rectangle cr)
     }
 
     if (A.ocrMode) ocr_draw();
+    pen_draw();
     if (A.boxDrag) {
         Vector2 a = GetWorldToScreen2D(A.boxStart, A.cam), b = GetWorldToScreen2D(A.boxEnd, A.cam);
         Rectangle br = { fminf(a.x, b.x), fminf(a.y, b.y), fabsf(a.x - b.x), fabsf(a.y - b.y) };
@@ -2637,6 +2752,7 @@ static Color *color_target_ptr(void)
 {
     Element *e = selected();
     if (A.colorTarget == COLOR_BG) return &A.doc.bg;
+    if (A.colorTarget == COLOR_PEN) return &g_penColor;
     if (!e) return NULL;
     if (A.colorTarget == COLOR_EFFECT) return &e->effectColor;
     return A.colorTarget == COLOR_FILL ? &e->fill : &e->stroke;
@@ -2662,6 +2778,59 @@ static void set_target_color(Color col)
     *c = col;
     Element *e = selected();
     if (A.colorTarget == COLOR_STROKE && e && e->strokeW <= 0 && col.a > 0) e->strokeW = fmaxf(3, fminf(e->w, e->h) * 0.02f);
+}
+
+typedef struct { float hue, sat, val; int drag; } HsvState;
+static HsvState g_popHsv, g_bgHsv;
+
+// Paleta, cuadro de color libre, barra de tono y "sin color". Devuelve dónde acaba.
+static float color_picker(float x, float y, float w, Color *cur, HsvState *st, void (*apply)(Color))
+{
+    float sx = x, sy = y, cs = 32, gap = (w - 6 * cs) / 5;
+    for (int i = 0; i < PALETTE_COUNT; i++) {
+        Rectangle sw = { sx + (i % 6) * (cs + gap), sy + (i / 6) * (cs + gap), cs, cs };
+        Color pc = PALETTE[i];
+        bool isSel = cur->r == pc.r && cur->g == pc.g && cur->b == pc.b && cur->a == 255;
+        if (ui_swatch(sw, pc, isSel)) {
+            apply(pc);
+            Vector3 hsv = ColorToHSV(pc);
+            st->hue = hsv.x; st->sat = hsv.y; st->val = hsv.z;
+        }
+    }
+    // Selector libre: cuadro de saturación/brillo y barra de tono
+    int rows = (PALETTE_COUNT + 5) / 6;
+    Rectangle sv = { x, sy + rows * (cs + gap) + 4, w, 92 };
+    Color hueCol = ColorFromHSV(st->hue, 1, 1);
+    DrawRectangleGradientH((int)sv.x, (int)sv.y, (int)sv.width, (int)sv.height, WHITE, hueCol);
+    DrawRectangleGradientV((int)sv.x, (int)sv.y, (int)sv.width, (int)sv.height, BLANK, BLACK);
+    DrawRectangleLinesEx(sv, 1, COL_BORDER);
+    Rectangle hb = { sv.x, sv.y + sv.height + 12, sv.width, 14 };
+    for (int i = 0; i < (int)hb.width; i++) DrawRectangle((int)hb.x + i, (int)hb.y, 1, (int)hb.height, ColorFromHSV(i / hb.width * 360, 1, 1));
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        if (ui_hover(sv)) st->drag = 1;
+        else if (ui_hover((Rectangle){ hb.x, hb.y - 4, hb.width, hb.height + 8 })) st->drag = 2;
+    }
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) st->drag = 0;
+    Vector2 m = GetMousePosition();
+    if (st->drag == 1) {
+        st->sat = Clamp((m.x - sv.x) / sv.width, 0, 1);
+        st->val = Clamp(1 - (m.y - sv.y) / sv.height, 0, 1);
+        apply(ColorFromHSV(st->hue, st->sat, st->val));
+    } else if (st->drag == 2) {
+        st->hue = Clamp((m.x - hb.x) / hb.width, 0, 0.999f) * 360;
+        apply(ColorFromHSV(st->hue, st->sat, st->val));
+    }
+    DrawCircleLinesV((Vector2){ sv.x + st->sat * sv.width, sv.y + (1 - st->val) * sv.height }, 6, WHITE);
+    DrawCircleLinesV((Vector2){ sv.x + st->sat * sv.width, sv.y + (1 - st->val) * sv.height }, 7, BLACK);
+    DrawRectangleLinesEx((Rectangle){ hb.x + st->hue / 360 * hb.width - 3, hb.y - 3, 6, hb.height + 6 }, 2, WHITE);
+    // Transparente
+    Rectangle tr = { x, hb.y + hb.height + 12, 26, 26 };
+    if (ui_swatch(tr, BLANK, cur->a == 0)) apply(BLANK);
+    ui_text("Sin color", tr.x + 36, tr.y + 4, 16, COL_MUTED);
+    char hex[16];
+    snprintf(hex, sizeof(hex), "#%02X%02X%02X", cur->r, cur->g, cur->b);
+    ui_text(hex, x + w - ui_text_width(hex, 16), tr.y + 4, 16, COL_MUTED);
+    return tr.y + tr.height;
 }
 
 static Rectangle popup_place(Rectangle anchor, float w, float h)
@@ -2934,51 +3103,11 @@ static void draw_popup(void)
         popup_card(r);
         Color *cur = color_target_ptr();
         if (!cur) { A.popup = POP_NONE; ui_set_layer(0); return; }
-        const char *title = A.colorTarget == COLOR_BG ? "Color de fondo" : A.colorTarget == COLOR_STROKE ? "Color del borde" : A.colorTarget == COLOR_EFFECT ? "Color del efecto" : "Color";
+        const char *title = A.colorTarget == COLOR_PEN ? "Color del lápiz" : A.colorTarget == COLOR_BG ? "Color de fondo" : A.colorTarget == COLOR_STROKE ? "Color del borde" : A.colorTarget == COLOR_EFFECT ? "Color del efecto" : "Color";
         ui_text_bold(title, r.x + 16, r.y + 12, 18, COL_TEXT);
-        float sx = r.x + 16, sy = r.y + 44, cs = 32, gap = 10;
-        for (int i = 0; i < PALETTE_COUNT; i++) {
-            Rectangle sw = { sx + (i % 6) * (cs + gap), sy + (i / 6) * (cs + gap), cs, cs };
-            Color pc = PALETTE[i];
-            bool isSel = cur->r == pc.r && cur->g == pc.g && cur->b == pc.b && cur->a == 255;
-            if (ui_swatch(sw, pc, isSel)) {
-                set_target_color(pc);
-                Vector3 hsv = ColorToHSV(pc);
-                A.hue = hsv.x; A.sat = hsv.y; A.val = hsv.z;
-            }
-        }
-        // Selector libre: cuadro de saturación/brillo y barra de tono
-        Rectangle sv = { r.x + 16, sy + 4 * (cs + gap) + 4, r.width - 32, 92 };
-        Color hueCol = ColorFromHSV(A.hue, 1, 1);
-        DrawRectangleGradientH((int)sv.x, (int)sv.y, (int)sv.width, (int)sv.height, WHITE, hueCol);
-        DrawRectangleGradientV((int)sv.x, (int)sv.y, (int)sv.width, (int)sv.height, BLANK, BLACK);
-        DrawRectangleLinesEx(sv, 1, COL_BORDER);
-        Rectangle hb = { sv.x, sv.y + sv.height + 12, sv.width, 14 };
-        for (int i = 0; i < (int)hb.width; i++) DrawRectangle((int)hb.x + i, (int)hb.y, 1, (int)hb.height, ColorFromHSV(i / hb.width * 360, 1, 1));
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-            if (ui_hover(sv)) A.colorDrag = 1;
-            else if (ui_hover((Rectangle){ hb.x, hb.y - 4, hb.width, hb.height + 8 })) A.colorDrag = 2;
-        }
-        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) A.colorDrag = 0;
-        Vector2 m = GetMousePosition();
-        if (A.colorDrag == 1) {
-            A.sat = Clamp((m.x - sv.x) / sv.width, 0, 1);
-            A.val = Clamp(1 - (m.y - sv.y) / sv.height, 0, 1);
-            set_target_color(ColorFromHSV(A.hue, A.sat, A.val));
-        } else if (A.colorDrag == 2) {
-            A.hue = Clamp((m.x - hb.x) / hb.width, 0, 0.999f) * 360;
-            set_target_color(ColorFromHSV(A.hue, A.sat, A.val));
-        }
-        DrawCircleLinesV((Vector2){ sv.x + A.sat * sv.width, sv.y + (1 - A.val) * sv.height }, 6, WHITE);
-        DrawCircleLinesV((Vector2){ sv.x + A.sat * sv.width, sv.y + (1 - A.val) * sv.height }, 7, BLACK);
-        DrawRectangleLinesEx((Rectangle){ hb.x + A.hue / 360 * hb.width - 3, hb.y - 3, 6, hb.height + 6 }, 2, WHITE);
-        // Transparente
-        Rectangle tr = { r.x + 16, hb.y + hb.height + 12, 26, 26 };
-        if (ui_swatch(tr, BLANK, cur->a == 0)) set_target_color(BLANK);
-        ui_text("Sin color", tr.x + 36, tr.y + 4, 16, COL_MUTED);
-        char hex[16];
-        snprintf(hex, sizeof(hex), "#%02X%02X%02X", cur->r, cur->g, cur->b);
-        ui_text(hex, r.x + r.width - 16 - ui_text_width(hex, 16), tr.y + 4, 16, COL_MUTED);
+        g_popHsv.hue = A.hue; g_popHsv.sat = A.sat; g_popHsv.val = A.val; g_popHsv.drag = A.colorDrag;
+        color_picker(r.x + 16, r.y + 44, r.width - 32, cur, &g_popHsv, set_target_color);
+        A.hue = g_popHsv.hue; A.sat = g_popHsv.sat; A.val = g_popHsv.val; A.colorDrag = g_popHsv.drag;
     }
     A.popupRect = r;
     ui_set_layer(0);
@@ -3208,23 +3337,34 @@ static void draw_shape_preview(int type, Rectangle cell)
     e.w = cell.width * 0.62f;
     e.h = (type == EL_LINE || type == EL_ARROW) ? 16 : cell.height * 0.62f;
     if (type == EL_LINE || type == EL_ARROW) e.strokeW = 5;
+    if (type == EL_CURVE || type == EL_PATH) { e.strokeW = 5; e.h = cell.height * 0.45f; }
+    if (type == EL_PATH) strcpy(e.text, "0,700 150,250 300,650 450,200 600,700 750,150 900,550 1000,400");
+    if (type == EL_BLOCKARROW) e.h = cell.height * 0.42f;
+    if (type == EL_BUBBLE) e.strokeW = 3;
     if (type == EL_RECT) e.fill = (Color){ 125, 92, 255, 255 };
     e.x = cell.x + (cell.width - e.w) / 2;
     e.y = cell.y + (cell.height - e.h) / 2;
     render_element(&e);
 }
 
+static bool g_bgPushed;
+static void set_bg_color(Color c)
+{
+    if (!g_bgPushed) { begin_change(); g_bgPushed = true; }
+    A.doc.bg = c;
+}
+
 static float panel_design(float x, float y, float w)
 {
     y = section_title("Color de fondo", x, y);
-    Rectangle sw = { x, y, 40, 40 };
-    if (ui_swatch(sw, A.doc.bg, false)) open_color(COLOR_BG, sw);
-    for (int i = 0; i < 5; i++) {
-        Color c = PALETTE[(int[]){ 5, 11, 15, 21, 18 }[i]];
-        Rectangle s = { x + 58 + i * 42, y + 6, 28, 28 };
-        if (ui_swatch(s, c, false)) { begin_change(); A.doc.bg = c; }
+    // Los mismos colores que para los textos, y el cuadro para elegir cualquiera
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_bgPushed = false;
+    if (!g_bgHsv.drag) {
+        Vector3 hsv = ColorToHSV(A.doc.bg);
+        if (hsv.y > 0.01f) g_bgHsv.hue = hsv.x;
+        g_bgHsv.sat = hsv.y; g_bgHsv.val = hsv.z;
     }
-    y += 62;
+    y = color_picker(x, y, fminf(w, 300), &A.doc.bg, &g_bgHsv, set_bg_color) + 24;
     y = section_title("Tamaño del lienzo", x, y);
     char cur[80];
     snprintf(cur, sizeof(cur), "Ahora: %d × %d píxeles", A.doc.w, A.doc.h);
@@ -3320,17 +3460,21 @@ static float panel_templates(float x, float y, float w)
     return y + rows * (chh + 10);
 }
 
+static void start_pen(void);
+
 static float panel_elements(float x, float y, float w)
 {
     y = section_title("Formas", x, y);
-    int shapes[] = { EL_RECT, EL_ELLIPSE, EL_TRIANGLE, EL_STAR, EL_HEART, -1 };
+    // -1 = rectángulo redondeado
+    int shapes[] = { EL_RECT, -1, EL_ELLIPSE, EL_TRIANGLE, EL_DIAMOND, EL_PENTAGON, EL_HEXAGON, EL_OCTAGON,
+                     EL_STAR, EL_HEART, EL_CROSS, EL_BLOCKARROW, EL_BUBBLE };
+    int ns = (int)(sizeof(shapes) / sizeof(shapes[0]));
     float cs = (w - 20) / 3;
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < ns; i++) {
         Rectangle cell = { x + (i % 3) * (cs + 10), y + (i / 3) * (cs + 10), cs, cs };
         bool hover = ui_hover(cell);
         DrawRectangleRounded(cell, 0.12f, 6, hover ? COL_ACCENT_LT : COL_HOVER);
         if (shapes[i] < 0) {
-            // Rectángulo con esquinas redondeadas
             Element e = element_default(EL_RECT);
             e.w = cs * 0.62f; e.h = cs * 0.62f; e.roundness = 0.5f;
             e.fill = (Color){ 31, 181, 166, 255 };
@@ -3346,17 +3490,60 @@ static float panel_elements(float x, float y, float w)
             if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) add_shape(shapes[i]);
         }
     }
-    y += 2 * (cs + 10) + 10;
-    y = section_title("Líneas", x, y);
-    int lines[] = { EL_LINE, EL_ARROW };
-    for (int i = 0; i < 2; i++) {
-        Rectangle cell = { x + i * (cs + 10), y, cs, cs * 0.6f };
+    y += ((ns + 2) / 3) * (cs + 10) + 10;
+
+    // Formas que ya vienen con relieve 3D
+    y = section_title("Con relieve 3D", x, y);
+    int fx3d[] = { EL_RECT, EL_ELLIPSE, EL_STAR, EL_HEART, EL_HEXAGON, EL_BLOCKARROW };
+    Color fx3dCol[] = { { 125, 92, 255, 255 }, { 31, 181, 166, 255 }, { 255, 196, 40, 255 }, { 240, 70, 110, 255 }, { 255, 140, 60, 255 }, { 60, 140, 240, 255 } };
+    for (int i = 0; i < 6; i++) {
+        Rectangle cell = { x + (i % 3) * (cs + 10), y + (i / 3) * (cs + 10), cs, cs };
         bool hover = ui_hover(cell);
         DrawRectangleRounded(cell, 0.12f, 6, hover ? COL_ACCENT_LT : COL_HOVER);
-        draw_shape_preview(lines[i], cell);
-        if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) add_shape(lines[i]);
+        Element e = element_default(fx3d[i]);
+        e.w = cs * 0.56f; e.h = fx3d[i] == EL_BLOCKARROW ? cs * 0.36f : cs * 0.56f;
+        e.fill = fx3dCol[i];
+        e.effect = FX_RELIEF; e.effectAmount = 0.5f;
+        e.x = cell.x + (cs - e.w) / 2 - cs * 0.04f; e.y = cell.y + (cs - e.h) / 2 - cs * 0.05f;
+        render_element(&e);
+        if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            add_shape(fx3d[i]);
+            Element *s = selected();
+            if (s) { s->fill = e.fill; s->effect = FX_RELIEF; s->effectAmount = 0.5f; }
+        }
     }
-    y += cs * 0.6f + 20;
+    y += 2 * (cs + 10) + 10;
+
+    y = section_title("Líneas", x, y);
+    // tipo, estilo (0 continua, 1 discontinua, 2 puntos)
+    int lt[6][2] = { { EL_LINE, 0 }, { EL_LINE, 1 }, { EL_LINE, 2 }, { EL_ARROW, 0 }, { EL_CURVE, 0 }, { EL_PATH, 0 } };
+    const char *ln[6] = { "Recta", "Discontinua", "De puntos", "Flecha", "Curva", "A mano" };
+    float lh = cs * 0.78f;
+    for (int i = 0; i < 6; i++) {
+        Rectangle cell = { x + (i % 3) * (cs + 10), y + (i / 3) * (lh + 10), cs, lh };
+        bool hover = ui_hover(cell);
+        bool active = lt[i][0] == EL_PATH && A.penMode;
+        DrawRectangleRounded(cell, 0.12f, 6, active ? COL_ACCENT : hover ? COL_ACCENT_LT : COL_HOVER);
+        Element e = element_default(lt[i][0]);
+        e.lineStyle = lt[i][1];
+        e.strokeW = 5;
+        e.w = cs * 0.66f;
+        e.h = (lt[i][0] == EL_LINE || lt[i][0] == EL_ARROW) ? 16 : lh * 0.34f;
+        if (lt[i][0] == EL_PATH) strcpy(e.text, "0,700 150,250 300,650 450,200 600,700 750,150 900,550 1000,400");
+        if (active) e.fill = WHITE;
+        e.x = cell.x + (cs - e.w) / 2; e.y = cell.y + lh * 0.42f - e.h / 2;
+        render_element(&e);
+        ui_text_center(ln[i], (Rectangle){ cell.x, cell.y + lh - 26, cs, 22 }, 14, active ? WHITE : COL_MUTED);
+        if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            if (lt[i][0] == EL_PATH) start_pen();
+            else {
+                add_shape(lt[i][0]);
+                Element *s = selected();
+                if (s) s->lineStyle = lt[i][1];
+            }
+        }
+    }
+    y += 2 * (lh + 10) + 10;
     ui_text("Consejo: con Mayús. pulsada las formas", x, y, 15, COL_MUTED);
     ui_text("mantienen la proporción y giran de 15° en 15°.", x, y + 20, 15, COL_MUTED);
     return y + 50;
@@ -3755,6 +3942,26 @@ static void draw_toolbar_items(Element *e, Rectangle tb, float x, float y)
         if (ui_button((Rectangle){ bx, y + 10, 88, 36 }, "Duplicar", BTN_GHOST)) cmd_duplicate();
         return;
     }
+    if (!e && A.penMode) {
+        ui_text_bold("Dibujar a mano", x, y + 18, 17, COL_TEXT);
+        x += ui_text_width("Dibujar a mano", 17) + 20;
+        tb_label("Color", x, y);
+        Rectangle sw = { x, y + 20, 30, 28 };
+        if (ui_swatch(sw, g_penColor, A.popup == POP_COLOR && A.colorTarget == COLOR_PEN)) open_color(COLOR_PEN, sw);
+        x += 56;
+        tb_label("Grosor", x, y);
+        float pw = g_penWidth;
+        ui_slider(7, (Rectangle){ x + 4, y + 30, 140 - 8, 12 }, &pw, 1, fmaxf(40, fminf(A.doc.w, A.doc.h) * 0.06f));
+        g_penWidth = pw;
+        DrawCircleV((Vector2){ x + 158, y + 28 }, fminf(14, g_penWidth * A.cam.zoom / 2 + 1), g_penColor);
+        x += 186;
+        tb_fit(&x, &y, 110);
+        if (ui_button((Rectangle){ x, y + 10, 110, 36 }, "Terminar", BTN_PRIMARY)) A.penMode = false;
+        x += 124;
+        const char *hint = "Arrastra el ratón sobre el lienzo para dibujar.";
+        if (x + ui_text_width(hint, 15) <= g_tbRight) ui_text(hint, x, y + 19, 15, COL_MUTED);
+        return;
+    }
     if (!e) {
         tb_label("Fondo", x, y);
         Rectangle sw = { x, y + 20, 30, 28 };
@@ -3773,9 +3980,9 @@ static void draw_toolbar_items(Element *e, Rectangle tb, float x, float y)
         return;
     }
 
-    bool shape = e->type == EL_RECT || e->type == EL_ELLIPSE || e->type == EL_TRIANGLE || e->type == EL_STAR || e->type == EL_HEART;
+    bool shape = IS_SHAPE(e->type);
     if (e->type != EL_IMAGE) {
-        tb_label(e->type == EL_TEXT ? "Color" : e->type == EL_LINE || e->type == EL_ARROW ? "Color" : "Relleno", x, y);
+        tb_label(e->type == EL_TEXT ? "Color" : IS_LINE(e->type) ? "Color" : "Relleno", x, y);
         Rectangle sw = { x, y + 20, 30, 28 };
         if (ui_swatch(sw, e->fill, A.popup == POP_COLOR && A.colorTarget == COLOR_FILL)) open_color(COLOR_FILL, sw);
         x += 56;
@@ -3795,10 +4002,38 @@ static void draw_toolbar_items(Element *e, Rectangle tb, float x, float y)
         x += 52;
         x = tb_slider(1, "Grosor del borde", x, y, 110, &e->strokeW, 0, fmaxf(4, fminf(e->w, e->h) * 0.25f));
     }
-    if (e->type == EL_LINE || e->type == EL_ARROW) {
+    if (IS_LINE(e->type)) {
         tb_fit(&x, &y, 110);
-        x = tb_slider(2, "Grosor", x, y, 110, &e->strokeW, 1, fmaxf(10, e->w * 0.15f));
-        if (e->h < e->strokeW * 3) e->h = e->strokeW * 3;
+        x = tb_slider(2, "Grosor", x, y, 110, &e->strokeW, 1, fmaxf(10, fmaxf(e->w, e->h) * 0.15f));
+        if ((e->type == EL_LINE || e->type == EL_ARROW) && e->h < e->strokeW * 3) e->h = e->strokeW * 3;
+    }
+    // Línea continua, discontinua o de puntos (también el borde de las formas)
+    if (IS_LINE(e->type) || shape) {
+        static const char *styles[3] = { "Continua", "Discontinua", "De puntos" };
+        tb_fit(&x, &y, 128);
+        tb_label(shape ? "Tipo de borde" : "Tipo de línea", x, y);
+        if (ui_button((Rectangle){ x, y + 18, 120, 32 }, styles[e->lineStyle % 3], BTN_NORMAL)) {
+            begin_change();
+            e->lineStyle = (e->lineStyle + 1) % 3;
+            if (shape && e->strokeW <= 0) { e->strokeW = fmaxf(6, fminf(e->w, e->h) * 0.05f); if (e->stroke.a == 0) e->stroke = (Color){ 40, 30, 80, 255 }; }
+        }
+        x += 134;
+        // Sombra o relieve 3D
+        static const char *fxn[3] = { "Ninguno", "Sombra", "Relieve 3D" };
+        int cur = e->effect == FX_SHADOW ? 1 : e->effect == FX_RELIEF ? 2 : 0;
+        tb_fit(&x, &y, 120 + (cur ? 110 : 0));
+        tb_label("Efecto", x, y);
+        Rectangle fb = { x, y + 18, 112, 32 };
+        if (cur) DrawRectangleRounded(fb, 0.25f, 6, COL_ACCENT_LT);
+        if (ui_button(fb, fxn[cur], cur ? BTN_GHOST : BTN_NORMAL)) {
+            begin_change();
+            cur = (cur + 1) % 3;
+            e->effect = cur == 1 ? FX_SHADOW : cur == 2 ? FX_RELIEF : FX_NONE;
+            if (e->effect != FX_NONE) e->effectColor = effect_default_color(e, e->effect);
+        }
+        if (cur) ui_text_center(fxn[cur], fb, 17, COL_ACCENT);
+        x += 126;
+        if (cur) x = tb_slider(8, cur == 2 ? "Profundidad" : "Distancia", x, y, 100, &e->effectAmount, 0, 1);
     }
     if (e->type == EL_RECT) tb_fit(&x, &y, 100);
     if (e->type == EL_RECT) x = tb_slider(3, "Esquinas", x, y, 100, &e->roundness, 0, 1);
