@@ -30,6 +30,9 @@ typedef enum {
     EL_BUBBLE,
     EL_CURVE,       // línea curva: la altura de la caja es lo que se dobla
     EL_PATH,        // a mano alzada: los puntos van en "text" ("x,y x,y ...", de 0 a 1000)
+    EL_FRAME,       // marco que rodea el diseño (espirales, entrelazado...); 'variant' es el diseño
+    EL_ORNAMENT,    // adorno suelto: espiral, voluta, separador, lazo...
+    EL_BANNER,      // letrero o cinta con el texto siguiendo la curva
     EL_TYPE_COUNT
 } ElementType;
 
@@ -37,6 +40,7 @@ typedef enum {
 #define IS_SHAPE(t) ((t) == EL_RECT || (t) == EL_ELLIPSE || (t) == EL_TRIANGLE || (t) == EL_STAR || (t) == EL_HEART || \
                      ((t) >= EL_PENTAGON && (t) <= EL_BUBBLE))
 // Líneas (solo color y grosor)
+#define IS_DECOR(t) ((t) == EL_FRAME || (t) == EL_ORNAMENT)
 #define IS_LINE(t) ((t) == EL_LINE || (t) == EL_ARROW || (t) == EL_CURVE || (t) == EL_PATH)
 
 typedef enum { ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT } TextAlign;
@@ -64,6 +68,9 @@ typedef struct {
     int asset;             // índice de imagen (imágenes)
     bool tint;             // imagen de un solo color: se pinta con 'fill' (partes de SVG)
     int lineStyle;         // 0 = continua, 1 = discontinua, 2 = de puntos (líneas y bordes)
+    int variant;           // diseño de marcos, adornos y letreros
+    float bend;            // curva del letrero (-1..1)
+    Color textColor;       // color del texto del letrero
     bool visible;
     bool locked;
     char text[TEXT_MAX];

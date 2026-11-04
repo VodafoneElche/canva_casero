@@ -6,7 +6,7 @@ Unicode true
 !include "x64.nsh"
 
 !ifndef VERSION
-  !define VERSION "0.11.0"
+  !define VERSION "0.12.0"
 !endif
 !ifndef EXE
   !define EXE "..\build\LienzoCasero.exe"

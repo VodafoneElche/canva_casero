@@ -1,4 +1,5 @@
 #include "render.h"
+#include "ornament.h"
 #include "platform.h"
 #include "rlgl.h"
 #include "raymath.h"
@@ -730,8 +731,13 @@ static int rect_points(const Element *e, Vector2 *p, float inset)
 #define PATH_MAX_PTS 200
 
 // Dibuja la forma o línea (sin efectos) con estos colores. Ya está en la caja local.
+static bool g_bodyMain = true;   // false mientras se dibujan las copias de la sombra o el relieve
+
 static void draw_shape_body(const Element *e, Color fill, Color stroke)
 {
+    if (e->type == EL_FRAME) { frame_draw(e, fill); return; }
+    if (e->type == EL_ORNAMENT) { ornament_draw(e, fill); return; }
+    if (e->type == EL_BANNER) { banner_draw(e, fill, stroke, g_bodyMain); return; }
     float hw = e->w / 2, hh = e->h / 2;
     switch (e->type) {
     case EL_RECT: {
@@ -811,7 +817,8 @@ void render_element(const Element *e)
 
     // Formas y líneas, con sombra o relieve 3D
     if (e->type != EL_TEXT && e->type != EL_IMAGE) {
-        float sz = IS_LINE(e->type) ? fmaxf(e->strokeW * 2.5f, 6) : fminf(e->w, e->h);
+        float sz = IS_LINE(e->type) ? fmaxf(e->strokeW * 2.5f, 6) : IS_DECOR(e->type) ? fmaxf(e->strokeW * 4, 8) : fminf(e->w, e->h);
+        g_bodyMain = false;
         if (e->effect == FX_SHADOW) {
             float off = sz * (0.03f + 0.07f * e->effectAmount);
             Color sc = with_opacity(e->effectColor, e->opacity);
@@ -823,7 +830,7 @@ void render_element(const Element *e)
         } else if (e->effect == FX_RELIEF) {
             // Como un bloque: copias más oscuras hacia abajo a la derecha
             float depth = sz * (0.04f + 0.10f * e->effectAmount);
-            int steps = (int)fminf(40, fmaxf(4, depth));
+            int steps = (int)fminf(IS_DECOR(e->type) ? 10 : 40, fmaxf(4, depth));
             Color side = with_opacity(darker(e->fill, 0.62f), e->opacity);
             Color sideS = (e->strokeW > 0 && !(IS_SHAPE(e->type) && e->lineStyle)) ? with_opacity(darker(e->stroke, 0.62f), e->opacity) : side;
             for (int k = steps; k >= 1; k--) {
@@ -831,6 +838,7 @@ void render_element(const Element *e)
                 draw_shape_at(e, o * 0.7f, o, side, sideS);
             }
         }
+        g_bodyMain = true;
         draw_shape_at(e, 0, 0, fill, stroke);
         return;
     }

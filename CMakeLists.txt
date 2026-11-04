@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(LienzoCasero VERSION 0.11.0 LANGUAGES C)
+project(LienzoCasero VERSION 0.12.0 LANGUAGES C)
 if(WIN32)
     enable_language(RC)
 endif()
@@ -35,6 +35,7 @@ set(SOURCES
     src/main.c
     src/doc.c
     src/render.c
+    src/ornament.c
     src/ui.c
     src/templates.c
     src/platform.c

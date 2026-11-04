@@ -146,6 +146,9 @@ const char *element_type_name(int type)
     case EL_BUBBLE: return "Bocadillo";
     case EL_CURVE: return "Línea curva";
     case EL_PATH: return "Dibujo a mano";
+    case EL_FRAME: return "Marco";
+    case EL_ORNAMENT: return "Adorno";
+    case EL_BANNER: return "Letrero";
     }
     return "Elemento";
 }
@@ -212,6 +215,22 @@ Element element_default(int type)
     case EL_PENTAGON: e.fill = (Color){ 255, 140, 60, 255 }; break;
     case EL_BUBBLE: e.fill = (Color){ 255, 255, 255, 255 }; e.strokeW = 6; break;
     case EL_BLOCKARROW: e.h = 180; break;
+    case EL_FRAME:
+    case EL_ORNAMENT:
+        e.fill = (Color){ 181, 138, 62, 255 };
+        e.strokeW = 6;
+        e.roundness = 0.5f;   // tamaño de los adornos del marco
+        break;
+    case EL_BANNER:
+        e.w = 700; e.h = 200;
+        e.fill = (Color){ 244, 232, 206, 255 };
+        e.stroke = (Color){ 120, 84, 40, 255 };
+        e.strokeW = 4;
+        e.bend = 0.45f;
+        e.fontSize = 56;
+        e.textColor = (Color){ 90, 24, 30, 255 };
+        strcpy(e.text, "TU TEXTO AQUÍ");
+        break;
     case EL_TEXT:
         e.w = 500;
         e.h = 80;
@@ -497,7 +516,9 @@ bool doc_save(const Document *d, const char *path)
         if (e->lineStyle) str_printf(&s, "trazo %d\n", e->lineStyle);
         if (e->type != EL_TEXT && e->effect != FX_NONE)
             str_printf(&s, "efecto %d %d %d %d %d %.3f\n", e->effect, e->effectColor.r, e->effectColor.g, e->effectColor.b, e->effectColor.a, e->effectAmount);
-        if (e->type == EL_PATH) {
+        if (IS_DECOR(e->type) || e->type == EL_BANNER)
+            str_printf(&s, "adorno %d %.3f %d %d %d %d\n", e->variant, e->bend, e->textColor.r, e->textColor.g, e->textColor.b, e->textColor.a);
+        if (e->type == EL_PATH || e->type == EL_BANNER) {
             str_printf(&s, "texto ");
             escape_text(&s, e->text);
             str_add(&s, "\n", 1);
@@ -593,6 +614,15 @@ bool doc_load(Document *d, const char *path)
                 le->effect = fx;
                 le->effectColor = (Color){ (unsigned char)r, (unsigned char)g, (unsigned char)b, (unsigned char)a };
                 le->effectAmount = amt;
+            }
+        } else if (strncmp(line, "adorno ", 7) == 0 && tmp->count > 0) {
+            Element *le2 = &tmp->el[tmp->count - 1];
+            int v, r, g, b, a;
+            float bd;
+            if (sscanf(line + 7, "%d %f %d %d %d %d", &v, &bd, &r, &g, &b, &a) == 6) {
+                le2->variant = v < 0 ? 0 : v;
+                le2->bend = bd;
+                le2->textColor = (Color){ (unsigned char)r, (unsigned char)g, (unsigned char)b, (unsigned char)a };
             }
         } else if (strncmp(line, "trazo ", 6) == 0 && tmp->count > 0) {
             tmp->el[tmp->count - 1].lineStyle = atoi(line + 6) % 3;
