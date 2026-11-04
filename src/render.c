@@ -1,6 +1,7 @@
 #include "render.h"
 #include "platform.h"
 #include "rlgl.h"
+#include "raymath.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -337,13 +338,46 @@ static void poly_fill(Vector2 center, const Vector2 *p, int n, Color col)
     for (int i = 0; i < n; i++) tri(center, p[i], p[(i + 1) % n], col);
 }
 
-static void poly_outline(const Vector2 *p, int n, float thick, Color col)
+// Una línea por varios puntos: continua, discontinua (style 1) o de puntos (style 2)
+static void polyline(const Vector2 *p, int n, bool closed, float thick, int style, Color col)
 {
-    for (int i = 0; i < n; i++) {
-        DrawLineEx(p[i], p[(i + 1) % n], thick, col);
-        DrawCircleV(p[i], thick / 2, col);
+    if (n < 2) return;
+    int segs = closed ? n : n - 1;
+    if (style == 0) {
+        for (int i = 0; i < segs; i++) {
+            DrawLineEx(p[i], p[(i + 1) % n], thick, col);
+            DrawCircleV(p[i], thick / 2, col);
+        }
+        if (!closed) DrawCircleV(p[n - 1], thick / 2, col);
+        return;
+    }
+    // Trozos (o puntos) a lo largo de todo el recorrido
+    float on = thick * 3.0f, period = style == 1 ? thick * 5.0f : thick * 2.0f;
+    float pos = 0, nextDot = 0;
+    for (int i = 0; i < segs; i++) {
+        Vector2 a = p[i], b = p[(i + 1) % n];
+        float len = Vector2Distance(a, b);
+        if (len < 0.001f) continue;
+        Vector2 d = Vector2Scale(Vector2Subtract(b, a), 1 / len);
+        if (style == 2) {
+            while (nextDot <= pos + len) {
+                DrawCircleV(Vector2Add(a, Vector2Scale(d, nextDot - pos)), thick / 2, col);
+                nextDot += period;
+            }
+        } else {
+            for (int k = (int)(pos / period); k * period < pos + len; k++) {
+                float s0 = fmaxf(k * period, pos), s1 = fminf(k * period + on, pos + len);
+                if (s1 <= s0) continue;
+                Vector2 q0 = Vector2Add(a, Vector2Scale(d, s0 - pos)), q1 = Vector2Add(a, Vector2Scale(d, s1 - pos));
+                DrawLineEx(q0, q1, thick, col);
+                DrawCircleV(q0, thick / 2, col);
+                DrawCircleV(q1, thick / 2, col);
+            }
+        }
+        pos += len;
     }
 }
+
 
 #define MAXPTS 128
 
@@ -376,6 +410,64 @@ static int shape_points(const Element *e, Vector2 *p, Vector2 *center)
             p[i] = (Vector2){ cosf(a) * hw * r, sinf(a) * hh * r + hh * 0.08f };
         }
         break;
+    case EL_PENTAGON:
+    case EL_HEXAGON:
+    case EL_OCTAGON: {
+        n = e->type == EL_PENTAGON ? 5 : e->type == EL_HEXAGON ? 6 : 8;
+        float a0 = e->type == EL_PENTAGON ? -PI / 2 : e->type == EL_HEXAGON ? 0 : PI / 8;
+        // Los puntos ocupan toda la caja (se estiran un poco si hace falta)
+        float minx = 1e9f, maxx = -1e9f, miny = 1e9f, maxy = -1e9f;
+        for (int i = 0; i < n; i++) {
+            float a = a0 + i * 2 * PI / n;
+            p[i] = (Vector2){ cosf(a), sinf(a) };
+            minx = fminf(minx, p[i].x); maxx = fmaxf(maxx, p[i].x);
+            miny = fminf(miny, p[i].y); maxy = fmaxf(maxy, p[i].y);
+        }
+        for (int i = 0; i < n; i++) {
+            p[i].x = -hw + (p[i].x - minx) / (maxx - minx) * e->w;
+            p[i].y = -hh + (p[i].y - miny) / (maxy - miny) * e->h;
+        }
+        break;
+    }
+    case EL_DIAMOND:
+        p[0] = (Vector2){ 0, -hh }; p[1] = (Vector2){ hw, 0 }; p[2] = (Vector2){ 0, hh }; p[3] = (Vector2){ -hw, 0 };
+        n = 4;
+        break;
+    case EL_CROSS: {
+        float ax = hw / 3, ay = hh / 3;
+        Vector2 c[12] = { { -ax, -hh }, { ax, -hh }, { ax, -ay }, { hw, -ay }, { hw, ay }, { ax, ay },
+                          { ax, hh }, { -ax, hh }, { -ax, ay }, { -hw, ay }, { -hw, -ay }, { -ax, -ay } };
+        for (int i = 0; i < 12; i++) p[i] = c[i];
+        n = 12;
+        break;
+    }
+    case EL_BLOCKARROW: {
+        float sy = hh * 0.42f, hx = hw - fminf(e->w * 0.45f, e->h * 0.9f);
+        Vector2 c[7] = { { -hw, -sy }, { hx, -sy }, { hx, -hh }, { hw, 0 }, { hx, hh }, { hx, sy }, { -hw, sy } };
+        for (int i = 0; i < 7; i++) p[i] = c[i];
+        n = 7;
+        break;
+    }
+    case EL_BUBBLE: {
+        // Bocadillo de cómic: caja redondeada con un pico abajo a la izquierda
+        float bh = e->h * 0.78f, top = -hh, bot = -hh + bh;
+        float r = fminf(e->w, bh) * 0.22f;
+        Vector2 cs[4] = { { hw - r, top + r }, { hw - r, bot - r }, { -hw + r, bot - r }, { -hw + r, top + r } };
+        float a0[4] = { -PI / 2, 0, PI / 2, PI };
+        for (int k = 0; k < 4; k++) {
+            if (k == 2) {   // antes de la esquina de abajo a la izquierda va el pico
+                p[n++] = (Vector2){ -hw + e->w * 0.42f, bot };
+                p[n++] = (Vector2){ -hw + e->w * 0.18f, hh };
+                p[n++] = (Vector2){ -hw + e->w * 0.24f, bot };
+            }
+            for (int i = 0; i <= 8; i++) {
+                float a = a0[k] + i * (PI / 2) / 8;
+                p[n++] = (Vector2){ cs[k].x + cosf(a) * r, cs[k].y + sinf(a) * r };
+            }
+        }
+        center->y = top + bh / 2 - hh * 0.0f;
+        break;
+    }
     case EL_HEART:
         n = 100;
         for (int i = 0; i < n; i++) {
@@ -588,6 +680,128 @@ static void draw_text_element(const Element *e, Color col)
 
 // ------------------------------------------------------------------ Elementos
 
+// Puntos del dibujo a mano alzada, ya en la caja local
+static int path_points(const Element *e, Vector2 *p, int max)
+{
+    int n = 0;
+    const char *t = e->text;
+    float hw = e->w / 2, hh = e->h / 2;
+    while (*t && n < max) {
+        int x, y, used = 0;
+        if (sscanf(t, "%d,%d%n", &x, &y, &used) != 2 || used == 0) break;
+        p[n++] = (Vector2){ -hw + x / 1000.0f * e->w, -hh + y / 1000.0f * e->h };
+        t += used;
+        while (*t == ' ') t++;
+    }
+    return n;
+}
+
+#define CURVE_STEPS 48
+
+// Línea curva: de abajo a la izquierda a abajo a la derecha, pasando por arriba del todo
+static int curve_points(const Element *e, Vector2 *p)
+{
+    float hw = e->w / 2, hh = e->h / 2, t = e->strokeW / 2;
+    Vector2 a = { -hw + t, hh - t }, c = { 0, -3 * hh + 4 * t }, b = { hw - t, hh - t };
+    for (int i = 0; i <= CURVE_STEPS; i++) {
+        float u = (float)i / CURVE_STEPS, v = 1 - u;
+        p[i] = (Vector2){ v * v * a.x + 2 * v * u * c.x + u * u * b.x, v * v * a.y + 2 * v * u * c.y + u * u * b.y };
+    }
+    return CURVE_STEPS + 1;
+}
+
+// Rectángulo (redondeado o no) como lista de puntos, para el borde discontinuo
+static int rect_points(const Element *e, Vector2 *p, float inset)
+{
+    float hw = e->w / 2 - inset, hh = e->h / 2 - inset;
+    float r = e->roundness * fminf(hw, hh);
+    if (r < 0.5f) { p[0] = (Vector2){ -hw, -hh }; p[1] = (Vector2){ hw, -hh }; p[2] = (Vector2){ hw, hh }; p[3] = (Vector2){ -hw, hh }; return 4; }
+    Vector2 cs[4] = { { hw - r, -hh + r }, { hw - r, hh - r }, { -hw + r, hh - r }, { -hw + r, -hh + r } };
+    float a0[4] = { -PI / 2, 0, PI / 2, PI };
+    int n = 0;
+    for (int k = 0; k < 4; k++)
+        for (int i = 0; i <= 10; i++) {
+            float a = a0[k] + i * (PI / 2) / 10;
+            p[n++] = (Vector2){ cs[k].x + cosf(a) * r, cs[k].y + sinf(a) * r };
+        }
+    return n;
+}
+
+#define PATH_MAX_PTS 200
+
+// Dibuja la forma o línea (sin efectos) con estos colores. Ya está en la caja local.
+static void draw_shape_body(const Element *e, Color fill, Color stroke)
+{
+    float hw = e->w / 2, hh = e->h / 2;
+    switch (e->type) {
+    case EL_RECT: {
+        Rectangle r = { -hw, -hh, e->w, e->h };
+        float shortSide = e->w < e->h ? e->w : e->h;
+        if (e->roundness > 0.001f) DrawRectangleRounded(r, e->roundness, 24, fill);
+        else DrawRectangleRec(r, fill);
+        if (e->strokeW > 0 && e->lineStyle != 0) {
+            Vector2 p[64];
+            int n = rect_points(e, p, e->strokeW / 2);
+            polyline(p, n, true, e->strokeW, e->lineStyle, stroke);
+        } else if (e->strokeW > 0 && e->roundness > 0.001f) {
+            // raylib dibuja el borde hacia fuera; lo metemos hacia dentro
+            Rectangle ri = { r.x + e->strokeW, r.y + e->strokeW, r.width - 2 * e->strokeW, r.height - 2 * e->strokeW };
+            float ro = e->roundness * shortSide / (shortSide - 2 * e->strokeW > 1 ? shortSide - 2 * e->strokeW : 1);
+            DrawRectangleRoundedLinesEx(ri, ro > 1 ? 1 : ro, 24, e->strokeW, stroke);
+        } else if (e->strokeW > 0) {
+            DrawRectangleLinesEx(r, e->strokeW, stroke);
+        }
+        break;
+    }
+    case EL_LINE:
+    case EL_ARROW: {
+        float t = e->strokeW > 1 ? e->strokeW : 1;
+        float endX = hw - t / 2;
+        if (e->type == EL_ARROW) {
+            float head = t * 3.2f;
+            if (head > e->w * 0.5f) head = e->w * 0.5f;
+            endX = hw - head * 0.8f;
+            tri((Vector2){ hw, 0 }, (Vector2){ hw - head, -head * 0.75f }, (Vector2){ hw - head, head * 0.75f }, fill);
+        }
+        Vector2 pts[2] = { { -hw + t / 2, 0 }, { endX, 0 } };
+        polyline(pts, 2, false, t, e->lineStyle, fill);
+        break;
+    }
+    case EL_CURVE: {
+        Vector2 p[CURVE_STEPS + 1];
+        int n = curve_points(e, p);
+        polyline(p, n, false, e->strokeW > 1 ? e->strokeW : 1, e->lineStyle, fill);
+        break;
+    }
+    case EL_PATH: {
+        Vector2 p[PATH_MAX_PTS];
+        int n = path_points(e, p, PATH_MAX_PTS);
+        if (n == 1) DrawCircleV(p[0], e->strokeW / 2, fill);
+        polyline(p, n, false, e->strokeW > 1 ? e->strokeW : 1, e->lineStyle, fill);
+        break;
+    }
+    default: {
+        Vector2 p[MAXPTS], c;
+        int n = shape_points(e, p, &c);
+        if (n == 0) break;
+        poly_fill(c, p, n, fill);
+        if (e->strokeW > 0) polyline(p, n, true, e->strokeW, e->lineStyle, stroke);
+        break;
+    }
+    }
+}
+
+static Color darker(Color c, float k) { return (Color){ (unsigned char)(c.r * k), (unsigned char)(c.g * k), (unsigned char)(c.b * k), c.a }; }
+
+static void draw_shape_at(const Element *e, float dx, float dy, Color fill, Color stroke)
+{
+    rlPushMatrix();
+    rlTranslatef(e->x + e->w / 2 + dx, e->y + e->h / 2 + dy, 0);
+    rlRotatef(e->rotation, 0, 0, 1);
+    draw_shape_body(e, fill, stroke);
+    rlPopMatrix();
+}
+
 void render_element(const Element *e)
 {
     if (!e->visible) return;
@@ -595,53 +809,37 @@ void render_element(const Element *e)
     Color stroke = with_opacity(e->stroke, e->opacity);
     float hw = e->w / 2, hh = e->h / 2;
 
+    // Formas y líneas, con sombra o relieve 3D
+    if (e->type != EL_TEXT && e->type != EL_IMAGE) {
+        float sz = IS_LINE(e->type) ? fmaxf(e->strokeW * 2.5f, 6) : fminf(e->w, e->h);
+        if (e->effect == FX_SHADOW) {
+            float off = sz * (0.03f + 0.07f * e->effectAmount);
+            Color sc = with_opacity(e->effectColor, e->opacity);
+            for (int k = 3; k >= 1; k--) {   // un poco difuminada
+                Color c = sc; c.a = (unsigned char)(sc.a * (k == 1 ? 0.6f : 0.25f));
+                float g = (k - 1) * off * 0.25f;
+                draw_shape_at(e, off + g, off + g, c, c);
+            }
+        } else if (e->effect == FX_RELIEF) {
+            // Como un bloque: copias más oscuras hacia abajo a la derecha
+            float depth = sz * (0.04f + 0.10f * e->effectAmount);
+            int steps = (int)fminf(40, fmaxf(4, depth));
+            Color side = with_opacity(darker(e->fill, 0.62f), e->opacity);
+            Color sideS = (e->strokeW > 0 && !(IS_SHAPE(e->type) && e->lineStyle)) ? with_opacity(darker(e->stroke, 0.62f), e->opacity) : side;
+            for (int k = steps; k >= 1; k--) {
+                float o = depth * k / steps;
+                draw_shape_at(e, o * 0.7f, o, side, sideS);
+            }
+        }
+        draw_shape_at(e, 0, 0, fill, stroke);
+        return;
+    }
+
     rlPushMatrix();
     rlTranslatef(e->x + hw, e->y + hh, 0);
     rlRotatef(e->rotation, 0, 0, 1);
 
     switch (e->type) {
-    case EL_RECT: {
-        Rectangle r = { -hw, -hh, e->w, e->h };
-        float shortSide = e->w < e->h ? e->w : e->h;
-        if (e->roundness > 0.001f) {
-            DrawRectangleRounded(r, e->roundness, 24, fill);
-            if (e->strokeW > 0) {
-                // raylib dibuja el borde hacia fuera; lo metemos hacia dentro
-                Rectangle ri = { r.x + e->strokeW, r.y + e->strokeW, r.width - 2 * e->strokeW, r.height - 2 * e->strokeW };
-                float ro = e->roundness * shortSide / (shortSide - 2 * e->strokeW > 1 ? shortSide - 2 * e->strokeW : 1);
-                DrawRectangleRoundedLinesEx(ri, ro > 1 ? 1 : ro, 24, e->strokeW, stroke);
-            }
-        } else {
-            DrawRectangleRec(r, fill);
-            if (e->strokeW > 0) DrawRectangleLinesEx(r, e->strokeW, stroke);
-        }
-        break;
-    }
-    case EL_ELLIPSE:
-    case EL_TRIANGLE:
-    case EL_STAR:
-    case EL_HEART: {
-        Vector2 p[MAXPTS], c;
-        int n = shape_points(e, p, &c);
-        poly_fill(c, p, n, fill);
-        if (e->strokeW > 0) poly_outline(p, n, e->strokeW, stroke);
-        break;
-    }
-    case EL_LINE:
-    case EL_ARROW: {
-        float t = e->strokeW > 1 ? e->strokeW : 1;
-        float endX = hw;
-        if (e->type == EL_ARROW) {
-            float head = t * 3.2f;
-            if (head > e->w * 0.5f) head = e->w * 0.5f;
-            endX = hw - head * 0.8f;
-            tri((Vector2){ hw, 0 }, (Vector2){ hw - head, -head * 0.75f }, (Vector2){ hw - head, head * 0.75f }, fill);
-        }
-        DrawLineEx((Vector2){ -hw + t / 2, 0 }, (Vector2){ endX, 0 }, t, fill);
-        DrawCircleV((Vector2){ -hw + t / 2, 0 }, t / 2, fill);
-        if (e->type == EL_LINE) DrawCircleV((Vector2){ hw - t / 2, 0 }, t / 2, fill);
-        break;
-    }
     case EL_TEXT:
         draw_text_element(e, fill);
         break;

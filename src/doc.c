@@ -137,6 +137,15 @@ const char *element_type_name(int type)
     case EL_ARROW: return "Flecha";
     case EL_TEXT: return "Texto";
     case EL_IMAGE: return "Imagen";
+    case EL_PENTAGON: return "Pentágono";
+    case EL_HEXAGON: return "Hexágono";
+    case EL_OCTAGON: return "Octógono";
+    case EL_DIAMOND: return "Rombo";
+    case EL_CROSS: return "Cruz";
+    case EL_BLOCKARROW: return "Flecha gruesa";
+    case EL_BUBBLE: return "Bocadillo";
+    case EL_CURVE: return "Línea curva";
+    case EL_PATH: return "Dibujo a mano";
     }
     return "Elemento";
 }
@@ -193,6 +202,16 @@ Element element_default(int type)
         e.strokeW = 8;
         e.fill = (Color){ 40, 40, 50, 255 };
         break;
+    case EL_CURVE:
+    case EL_PATH:
+        e.h = 120;
+        e.strokeW = 8;
+        e.fill = (Color){ 40, 40, 50, 255 };
+        break;
+    case EL_HEXAGON: e.fill = (Color){ 31, 181, 166, 255 }; break;
+    case EL_PENTAGON: e.fill = (Color){ 255, 140, 60, 255 }; break;
+    case EL_BUBBLE: e.fill = (Color){ 255, 255, 255, 255 }; e.strokeW = 6; break;
+    case EL_BLOCKARROW: e.h = 180; break;
     case EL_TEXT:
         e.w = 500;
         e.h = 80;
@@ -475,6 +494,14 @@ bool doc_save(const Document *d, const char *path)
                    e->stroke.r, e->stroke.g, e->stroke.b, e->stroke.a,
                    e->strokeW, e->roundness, e->opacity, e->font, e->fontSize, e->align,
                    asset, e->visible ? 1 : 0, e->locked ? 1 : 0);
+        if (e->lineStyle) str_printf(&s, "trazo %d\n", e->lineStyle);
+        if (e->type != EL_TEXT && e->effect != FX_NONE)
+            str_printf(&s, "efecto %d %d %d %d %d %.3f\n", e->effect, e->effectColor.r, e->effectColor.g, e->effectColor.b, e->effectColor.a, e->effectAmount);
+        if (e->type == EL_PATH) {
+            str_printf(&s, "texto ");
+            escape_text(&s, e->text);
+            str_add(&s, "\n", 1);
+        }
         if (e->type == EL_TEXT) {
             str_printf(&s, "fuente %s\n", font_name(e->font));
             str_printf(&s, "efecto %d %d %d %d %d %.3f\n", e->effect, e->effectColor.r, e->effectColor.g, e->effectColor.b, e->effectColor.a, e->effectAmount);
@@ -567,6 +594,8 @@ bool doc_load(Document *d, const char *path)
                 le->effectColor = (Color){ (unsigned char)r, (unsigned char)g, (unsigned char)b, (unsigned char)a };
                 le->effectAmount = amt;
             }
+        } else if (strncmp(line, "trazo ", 6) == 0 && tmp->count > 0) {
+            tmp->el[tmp->count - 1].lineStyle = atoi(line + 6) % 3;
         } else if (strncmp(line, "espaciado ", 10) == 0 && tmp->count > 0) {
             tmp->el[tmp->count - 1].letterSpacing = (float)atof(line + 10);
         } else if (strncmp(line, "interlineado ", 13) == 0 && tmp->count > 0) {
