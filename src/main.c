@@ -6,6 +6,7 @@
 #include "doc.h"
 #include "platform.h"
 #include "render.h"
+#include "ornament.h"
 #include "magic.h"
 #include "pdf.h"
 #include "eps.h"
@@ -19,6 +20,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define TB_BANNER_TEXT 120   // cuadro de texto del letrero en la barra de arriba
 
 // raylib trae GLFW dentro; lo usamos para poder cancelar el cierre de la ventana
 extern void glfwSetWindowShouldClose(void *window, int value);
@@ -34,7 +37,7 @@ typedef enum { PANEL_DESIGN, PANEL_TEMPLATES, PANEL_ELEMENTS, PANEL_CLIPART, PAN
 typedef enum { POP_NONE, POP_FILE, POP_EXPORT, POP_COLOR, POP_FONT, POP_EFFECT } PopupId;
 typedef enum { MODAL_NONE, MODAL_NEW, MODAL_SAVE_TEMPLATE, MODAL_SVG } ModalId;
 typedef enum { DRAG_NONE, DRAG_MOVE, DRAG_RESIZE, DRAG_ROTATE, DRAG_PAN } DragMode;
-typedef enum { COLOR_FILL, COLOR_STROKE, COLOR_BG, COLOR_EFFECT, COLOR_PEN } ColorTarget;
+typedef enum { COLOR_FILL, COLOR_STROKE, COLOR_BG, COLOR_EFFECT, COLOR_PEN, COLOR_BTEXT } ColorTarget;
 
 typedef struct { const char *name; int w, h; } SizePreset;
 static const SizePreset PRESETS[] = {
@@ -377,6 +380,20 @@ static void add_shape(int type)
     if (type == EL_CURVE) { e->w = s * 1.4f; e->h = s * 0.45f; e->strokeW = fmaxf(4, s * 0.03f); }
     if (type == EL_BLOCKARROW) { e->w = s * 1.3f; e->h = s * 0.7f; }
     if (type == EL_BUBBLE) { e->w = s * 1.3f; e->h = s; e->strokeW = fmaxf(3, s * 0.02f); }
+    float dm = fminf(A.doc.w, A.doc.h);
+    if (type == EL_FRAME) {   // rodea todo el diseño
+        float m = dm * 0.03f;
+        e->w = A.doc.w - 2 * m; e->h = A.doc.h - 2 * m;
+        e->strokeW = fmaxf(1.5f, dm * 0.005f);
+    }
+    if (type == EL_ORNAMENT) e->strokeW = fmaxf(1.5f, s * 0.03f);
+    if (type == EL_BANNER) {
+        e->w = A.doc.w * 0.72f; e->h = e->w * 0.26f;
+        e->fontSize = roundf(e->h * 0.25f);
+        e->strokeW = fmaxf(1.5f, e->h * 0.018f);
+        int f = font_find("Cinzel");
+        if (f >= 0) e->font = f;
+    }
     Vector2 c = doc_center();
     e->x = c.x - e->w / 2;
     e->y = c.y - e->h / 2;
@@ -814,7 +831,12 @@ static bool hit_element(const Element *e, Vector2 w, float pad)
     float hh = e->h / 2;
     if (e->type == EL_LINE || e->type == EL_ARROW) hh = fmaxf(hh, pad * 2);
     if (e->type == EL_PATH || e->type == EL_CURVE) pad += e->strokeW / 2;
-    return fabsf(l.x) <= e->w / 2 + pad && fabsf(l.y) <= hh + pad;
+    bool in = fabsf(l.x) <= e->w / 2 + pad && fabsf(l.y) <= hh + pad;
+    if (in && e->type == EL_FRAME) {   // el marco solo se coge por el borde, no por el centro
+        float b = frame_band(e) + pad;
+        if (fabsf(l.x) < e->w / 2 - b && fabsf(l.y) < e->h / 2 - b) return false;
+    }
+    return in;
 }
 
 // En las imágenes con transparencia (partes de un SVG, dibujos) solo cuenta lo que tiene color
@@ -1006,6 +1028,7 @@ static Element g_groupOrig[MAX_ELEMENTS];
 static Rectangle g_groupBox0;
 static Vector2 g_groupStart, g_groupStartMouse;
 static bool g_groupPushed;
+static Vector2 g_mqStartScreen;
 static bool g_marquee;           // arrastrando un recuadro para elegir objetos
 static Vector2 g_mqStart, g_mqEnd;
 static int g_mqHit;
@@ -2291,12 +2314,20 @@ static void canvas_input(Rectangle cr)
         if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
             g_marquee = false;
             Vector2 a = GetWorldToScreen2D(g_mqStart, A.cam), b = GetWorldToScreen2D(g_mqEnd, A.cam);
-            if (fabsf(a.x - b.x) < 5 && fabsf(a.y - b.y) < 5) { select_index(g_mqHit); return; }
+            (void)a; (void)b;
+            // Se mide en la pantalla con el ratón: la vista puede moverse si cambia la barra de arriba
+            if (fabsf(m.x - g_mqStartScreen.x) < 5 && fabsf(m.y - g_mqStartScreen.y) < 5) { select_index(g_mqHit); return; }
             Rectangle r = { fminf(g_mqStart.x, g_mqEnd.x), fminf(g_mqStart.y, g_mqEnd.y), fabsf(g_mqStart.x - g_mqEnd.x), fabsf(g_mqStart.y - g_mqEnd.y) };
             static bool on[MAX_ELEMENTS];
             for (int i = 0; i < A.doc.count; i++) {
                 const Element *e = &A.doc.el[i];
                 on[i] = e->visible && !e->locked && CheckCollisionRecs(r, element_bounds(e));
+                if (on[i] && e->type == EL_FRAME) {   // un marco solo cuenta si el recuadro toca su borde
+                    Rectangle eb = element_bounds(e);
+                    float bd = frame_band(e);
+                    Rectangle hole = { eb.x + bd, eb.y + bd, eb.width - 2 * bd, eb.height - 2 * bd };
+                    if (r.x > hole.x && r.y > hole.y && r.x + r.width < hole.x + hole.width && r.y + r.height < hole.y + hole.height) on[i] = false;
+                }
             }
             select_many(on);
         }
@@ -2326,6 +2357,7 @@ static void canvas_input(Rectangle cr)
         if (!onHandle && (hit < 0 || A.doc.el[hit].locked) && !(sel && hit == A.sel)) {
             g_marquee = true;
             g_mqStart = g_mqEnd = w;
+            g_mqStartScreen = m;
             g_mqHit = hit;
             select_index(-1);
             return;
@@ -2364,6 +2396,7 @@ static void canvas_input(Rectangle cr)
         A.lastClickSel = hit;
         select_index(hit);
         sel = selected();
+        if (sel && dbl && sel->type == EL_BANNER && !sel->locked) ui_focus_textbox(TB_BANNER_TEXT);
         if (sel && dbl && sel->type == EL_TEXT && !sel->locked) {
             A.editing = true;
             A.editPushed = false;
@@ -2755,6 +2788,7 @@ static Color *color_target_ptr(void)
     if (A.colorTarget == COLOR_PEN) return &g_penColor;
     if (!e) return NULL;
     if (A.colorTarget == COLOR_EFFECT) return &e->effectColor;
+    if (A.colorTarget == COLOR_BTEXT) return &e->textColor;
     return A.colorTarget == COLOR_FILL ? &e->fill : &e->stroke;
 }
 
@@ -3103,7 +3137,7 @@ static void draw_popup(void)
         popup_card(r);
         Color *cur = color_target_ptr();
         if (!cur) { A.popup = POP_NONE; ui_set_layer(0); return; }
-        const char *title = A.colorTarget == COLOR_PEN ? "Color del lápiz" : A.colorTarget == COLOR_BG ? "Color de fondo" : A.colorTarget == COLOR_STROKE ? "Color del borde" : A.colorTarget == COLOR_EFFECT ? "Color del efecto" : "Color";
+        const char *title = A.colorTarget == COLOR_PEN ? "Color del lápiz" : A.colorTarget == COLOR_BG ? "Color de fondo" : A.colorTarget == COLOR_STROKE ? "Color del borde" : A.colorTarget == COLOR_EFFECT ? "Color del efecto" : A.colorTarget == COLOR_BTEXT ? "Color de las letras" : "Color";
         ui_text_bold(title, r.x + 16, r.y + 12, 18, COL_TEXT);
         g_popHsv.hue = A.hue; g_popHsv.sat = A.sat; g_popHsv.val = A.val; g_popHsv.drag = A.colorDrag;
         color_picker(r.x + 16, r.y + 44, r.width - 32, cur, &g_popHsv, set_target_color);
@@ -3461,6 +3495,7 @@ static float panel_templates(float x, float y, float w)
 }
 
 static void start_pen(void);
+static bool g_bannerFresh;   // letrero recién puesto: lo primero que escribas sustituye el texto de ejemplo
 
 static float panel_elements(float x, float y, float w)
 {
@@ -3544,6 +3579,84 @@ static float panel_elements(float x, float y, float w)
         }
     }
     y += 2 * (lh + 10) + 10;
+    // Marcos para rodear todo el diseño
+    y = section_title("Marcos para rodear el diseño", x, y);
+    float fh = cs * 0.95f;
+    for (int i = 0; i < FRAME_VARIANTS; i++) {
+        Rectangle cell = { x + (i % 3) * (cs + 10), y + (i / 3) * (fh + 10), cs, fh };
+        bool hover = ui_hover(cell);
+        DrawRectangleRounded(cell, 0.12f, 6, hover ? COL_ACCENT_LT : COL_HOVER);
+        Element e = element_default(EL_FRAME);
+        e.variant = i;
+        e.strokeW = 1.4f;
+        e.x = cell.x + 8; e.y = cell.y + 8; e.w = cs - 16; e.h = fh - 36;
+        render_element(&e);
+        ui_text_center(frame_variant_name(i), (Rectangle){ cell.x, cell.y + fh - 26, cs, 22 }, 13, COL_MUTED);
+        if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            add_shape(EL_FRAME);
+            Element *s = selected();
+            if (s) s->variant = i;
+        }
+    }
+    y += ((FRAME_VARIANTS + 2) / 3) * (fh + 10) + 10;
+
+    // Adornos sueltos
+    y = section_title("Espirales y adornos", x, y);
+    static const float ornAspect[ORNAMENT_VARIANTS] = { 1, 2, 1.1f, 4, 1, 1, 4, 4 };
+    for (int i = 0; i < ORNAMENT_VARIANTS; i++) {
+        Rectangle cell = { x + (i % 3) * (cs + 10), y + (i / 3) * (fh + 10), cs, fh };
+        bool hover = ui_hover(cell);
+        DrawRectangleRounded(cell, 0.12f, 6, hover ? COL_ACCENT_LT : COL_HOVER);
+        Element e = element_default(EL_ORNAMENT);
+        e.variant = i;
+        e.strokeW = 2;
+        float bw = cs * 0.74f, bh = bw / ornAspect[i];
+        if (bh > fh * 0.55f) { bh = fh * 0.55f; bw = bh * ornAspect[i]; }
+        e.w = bw; e.h = bh;
+        e.x = cell.x + (cs - bw) / 2; e.y = cell.y + (fh - 26 - bh) / 2 + 2;
+        render_element(&e);
+        ui_text_center(ornament_variant_name(i), (Rectangle){ cell.x, cell.y + fh - 26, cs, 22 }, 13, COL_MUTED);
+        if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            add_shape(EL_ORNAMENT);
+            Element *s = selected();
+            if (s) {
+                float sz = base_size();
+                s->variant = i;
+                s->w = ornAspect[i] >= 2 ? sz * 1.6f : sz;
+                s->h = s->w / ornAspect[i];
+                Vector2 c = doc_center();
+                s->x = c.x - s->w / 2; s->y = c.y - s->h / 2;
+            }
+        }
+    }
+    y += ((ORNAMENT_VARIANTS + 2) / 3) * (fh + 10) + 10;
+
+    // Letreros: cintas con el texto en curva
+    y = section_title("Letreros", x, y);
+    float bwc = (w - 10) / 2, bhc = bwc * 0.5f;
+    for (int i = 0; i < BANNER_VARIANTS; i++) {
+        Rectangle cell = { x + (i % 2) * (bwc + 10), y + (i / 2) * (bhc + 10), bwc, bhc };
+        bool hover = ui_hover(cell);
+        DrawRectangleRounded(cell, 0.12f, 6, hover ? COL_ACCENT_LT : COL_HOVER);
+        Element e = element_default(EL_BANNER);
+        e.variant = i;
+        e.w = bwc * 0.9f; e.h = bhc * 0.62f;
+        e.strokeW = 1.2f;
+        e.fontSize = e.h * 0.4f;
+        int f = font_find("Cinzel");
+        if (f >= 0) e.font = f;
+        strcpy(e.text, "Texto");
+        e.x = cell.x + (bwc - e.w) / 2; e.y = cell.y + (bhc - 22 - e.h) / 2 + 2;
+        render_element(&e);
+        ui_text_center(banner_variant_name(i), (Rectangle){ cell.x, cell.y + bhc - 24, bwc, 22 }, 13, COL_MUTED);
+        if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            add_shape(EL_BANNER);
+            Element *s = selected();
+            if (s) { s->variant = i; g_bannerFresh = true; ui_focus_textbox(TB_BANNER_TEXT); }
+        }
+    }
+    y += ((BANNER_VARIANTS + 1) / 2) * (bhc + 10) + 10;
+
     ui_text("Consejo: con Mayús. pulsada las formas", x, y, 15, COL_MUTED);
     ui_text("mantienen la proporción y giran de 15° en 15°.", x, y + 20, 15, COL_MUTED);
     return y + 50;
@@ -3982,7 +4095,7 @@ static void draw_toolbar_items(Element *e, Rectangle tb, float x, float y)
 
     bool shape = IS_SHAPE(e->type);
     if (e->type != EL_IMAGE) {
-        tb_label(e->type == EL_TEXT ? "Color" : IS_LINE(e->type) ? "Color" : "Relleno", x, y);
+        tb_label(e->type == EL_BANNER ? "Cinta" : (e->type == EL_TEXT || IS_LINE(e->type) || IS_DECOR(e->type)) ? "Color" : "Relleno", x, y);
         Rectangle sw = { x, y + 20, 30, 28 };
         if (ui_swatch(sw, e->fill, A.popup == POP_COLOR && A.colorTarget == COLOR_FILL)) open_color(COLOR_FILL, sw);
         x += 56;
@@ -3993,7 +4106,7 @@ static void draw_toolbar_items(Element *e, Rectangle tb, float x, float y)
         if (ui_swatch(sw, e->fill, A.popup == POP_COLOR && A.colorTarget == COLOR_FILL)) open_color(COLOR_FILL, sw);
         x += 56;
     }
-    if (shape || e->type == EL_IMAGE) {
+    if (shape || e->type == EL_IMAGE || e->type == EL_BANNER) {
         tb_fit(&x, &y, 52 + 110);
         tb_label("Borde", x, y);
         Rectangle sw = { x, y + 20, 30, 28 };
@@ -4008,7 +4121,82 @@ static void draw_toolbar_items(Element *e, Rectangle tb, float x, float y)
         if ((e->type == EL_LINE || e->type == EL_ARROW) && e->h < e->strokeW * 3) e->h = e->strokeW * 3;
     }
     // Línea continua, discontinua o de puntos (también el borde de las formas)
-    if (IS_LINE(e->type) || shape) {
+    // Marcos, adornos y letreros: diseño, grosor, tamaño y texto
+    if (IS_DECOR(e->type) || e->type == EL_BANNER) {
+        int nv = e->type == EL_FRAME ? FRAME_VARIANTS : e->type == EL_ORNAMENT ? ORNAMENT_VARIANTS : BANNER_VARIANTS;
+        const char *vn = e->type == EL_FRAME ? frame_variant_name(e->variant) : e->type == EL_ORNAMENT ? ornament_variant_name(e->variant) : banner_variant_name(e->variant);
+        tb_fit(&x, &y, 170);
+        tb_label("Diseño (pulsa para cambiar)", x, y);
+        if (ui_button((Rectangle){ x, y + 18, 162, 32 }, vn, BTN_NORMAL)) { begin_change(); e->variant = (e->variant + 1) % nv; }
+        x += 176;
+    }
+    if (IS_DECOR(e->type)) {
+        tb_fit(&x, &y, 110);
+        x = tb_slider(9, "Grosor", x, y, 110, &e->strokeW, 0.5f, fmaxf(8, fminf(e->w, e->h) * 0.04f));
+    }
+    if (e->type == EL_FRAME) {
+        tb_fit(&x, &y, 110);
+        x = tb_slider(10, "Tamaño adornos", x, y, 110, &e->roundness, 0, 1);
+        tb_fit(&x, &y, 130);
+        if (ui_button((Rectangle){ x, y + 10, 122, 36 }, "Rodear todo", BTN_NORMAL)) {
+            begin_change();
+            float m = fminf(A.doc.w, A.doc.h) * 0.03f;
+            e->rotation = 0;
+            e->x = m; e->y = m; e->w = A.doc.w - 2 * m; e->h = A.doc.h - 2 * m;
+        }
+        x += 136;
+    }
+    if (e->type == EL_BANNER) {
+        tb_fit(&x, &y, 110);
+        x = tb_slider(11, "Curva", x, y, 110, &e->bend, -1, 1);
+        tb_fit(&x, &y, 56);
+        tb_label("Letras", x, y);
+        Rectangle sw = { x, y + 20, 30, 28 };
+        if (ui_swatch(sw, e->textColor, A.popup == POP_COLOR && A.colorTarget == COLOR_BTEXT)) open_color(COLOR_BTEXT, sw);
+        x += 56;
+        tb_fit(&x, &y, 180 + 124 + 260);
+        Rectangle fb = { x, y + 10, 170, 36 };
+        bool h = ui_hover(fb);
+        DrawRectangleRounded(fb, 0.25f, 6, h ? COL_HOVER : WHITE);
+        DrawRectangleRoundedLinesEx(fb, 0.25f, 6, 1, COL_BORDER);
+        ui_scissor(fb.x, fb.y, fb.width - 26, fb.height);
+        DrawTextEx(font_get(e->font), font_name(e->font), (Vector2){ fb.x + 10, fb.y + 8 }, 19, 0, COL_TEXT);
+        EndScissorMode();
+        DrawTriangle((Vector2){ fb.x + fb.width - 20, fb.y + 15 }, (Vector2){ fb.x + fb.width - 15, fb.y + 21 }, (Vector2){ fb.x + fb.width - 10, fb.y + 15 }, COL_MUTED);
+        if (h && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) { A.fontScroll = 0; open_popup(POP_FONT, fb); }
+        x += 180;
+        if (ui_button((Rectangle){ x, y + 10, 32, 36 }, "-", BTN_NORMAL)) { begin_change(); e->fontSize = fmaxf(6, roundf(e->fontSize * 0.9f)); }
+        char sz[16];
+        snprintf(sz, sizeof(sz), "%.0f", e->fontSize);
+        ui_text_center(sz, (Rectangle){ x + 32, y + 10, 48, 36 }, 18, COL_TEXT);
+        if (ui_button((Rectangle){ x + 80, y + 10, 32, 36 }, "+", BTN_NORMAL)) { begin_change(); e->fontSize = fminf(1000, roundf(e->fontSize * 1.1f + 1)); }
+        x += 124;
+        // El texto del letrero se escribe aquí
+        static char buf[TEXT_MAX];
+        static int bufFor = -1;
+        if (bufFor != A.sel || (!ui_textbox_focused() && strcmp(buf, e->text) != 0)) { strncpy(buf, e->text, TEXT_MAX - 1); bufFor = A.sel; }
+        tb_label("Texto del letrero", x, y);
+        char before[TEXT_MAX];
+        strcpy(before, buf);
+        if (ui_textbox(TB_BANNER_TEXT, (Rectangle){ x, y + 18, 250, 34 }, buf, TEXT_MAX, NULL)) {
+            if (g_bannerFresh) {   // lo primero que escribes sustituye al texto de ejemplo
+                size_t bl = strlen(before);
+                if (strlen(buf) > bl && strncmp(buf, before, bl) == 0) memmove(buf, buf + bl, strlen(buf + bl) + 1);
+                else buf[0] = 0;
+                g_bannerFresh = false;
+            }
+            static int pushedFor = -2;
+            static double pushedAt = 0;
+            if (pushedFor != A.sel || GetTime() - pushedAt > 2) begin_change();
+            pushedFor = A.sel; pushedAt = GetTime();
+            strncpy(e->text, buf, TEXT_MAX - 1);
+            A.dirty = true;
+        }
+        if (!ui_textbox_focused()) g_bannerFresh = false;
+        x += 264;
+    }
+    if (IS_LINE(e->type) || shape || IS_DECOR(e->type) || e->type == EL_BANNER) {
+        if (IS_LINE(e->type) || shape) {
         static const char *styles[3] = { "Continua", "Discontinua", "De puntos" };
         tb_fit(&x, &y, 128);
         tb_label(shape ? "Tipo de borde" : "Tipo de línea", x, y);
@@ -4018,6 +4206,7 @@ static void draw_toolbar_items(Element *e, Rectangle tb, float x, float y)
             if (shape && e->strokeW <= 0) { e->strokeW = fmaxf(6, fminf(e->w, e->h) * 0.05f); if (e->stroke.a == 0) e->stroke = (Color){ 40, 30, 80, 255 }; }
         }
         x += 134;
+        }
         // Sombra o relieve 3D
         static const char *fxn[3] = { "Ninguno", "Sombra", "Relieve 3D" };
         int cur = e->effect == FX_SHADOW ? 1 : e->effect == FX_RELIEF ? 2 : 0;

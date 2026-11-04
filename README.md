@@ -21,6 +21,12 @@ sin internet en **Windows 10 y 11 (64 bits)**.
   Con relleno, borde (continuo, discontinuo o de puntos), transparencia, sombra y **relieve 3D**.
 - **Líneas**: recta, discontinua, de puntos, flecha, **curva** y **a mano alzada** (botón "A mano":
   arrastra el ratón sobre el lienzo para dibujar; Esc o "Terminar" para acabar).
+- **Marcos para rodear el diseño**: clásico con volutas, espirales, entrelazado, ondas, cuerda,
+  solo esquinas y escalonado. Se pueden cambiar de color, grosor y tamaño de los adornos
+  ("Rodear todo" los ajusta al borde del diseño).
+- **Espirales y adornos**: espiral, doble espiral, volutas, separador, esquina, lazo, rizos y trenza.
+- **Letreros**: cintas con pliegues, con picos, pergamino, cinta ondulada y etiqueta. El texto
+  se escribe arriba, en "Texto del letrero", y sigue la curva (que se puede cambiar).
 - **Color de fondo**: paleta completa y selector libre de color, igual que en el texto.
 - **Dibujos**: 140 dibujos de colores en 10 temas (fiestas, amor, animales, comida, Navidad...).
   También se pueden abrir dibujos **SVG**, **EPS** y **AI** propios, por ejemplo los de vector4free.com o vecteezy.com.
@@ -49,7 +55,7 @@ sin internet en **Windows 10 y 11 (64 bits)**.
 
 1. Descarga el instalador de la última versión en
    [Releases](https://github.com/VodafoneElche/canva_casero/releases/latest).
-2. Ejecuta `LienzoCasero-0.11.0-instalador.exe`.
+2. Ejecuta `LienzoCasero-0.12.0-instalador.exe`.
 3. Windows puede avisar con "Windows protegió su PC" porque el programa no está firmado:
    pulsa **Más información** y luego **Ejecutar de todas formas**.
 
